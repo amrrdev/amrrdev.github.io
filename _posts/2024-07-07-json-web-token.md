@@ -1,3 +1,8 @@
+---
+tags: ["JWT", "Authentication", "Authorization", "Web Security"]
+categories: ["Web Development", "Security"]
+---
+
 # Understanding JWT (JSON Web Tokens)
 
 JWTs, or JSON Web Tokens, are secure tokens sent with each request or response to ensure that the data between parties remains unchanged. Their simplicity and efficiency make them one of the most commonly used methods for user authentication and authorization.
