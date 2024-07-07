@@ -51,7 +51,13 @@ categories: ["Backend"]
 
 1. **JavaScript Call**:
 
-   `const fs = require('fs');  fs.readFile('example.txt', 'utf8', (err, data) => {   if (err) throw err;   console.log(data); });`
+   ```javascript
+   const fs = require("fs");
+   fs.readFile("example.txt", "utf8", (err, data) => {
+     if (err) throw err;
+     console.log(data);
+   });
+   ```
 
 2. **Node.js Internal**:
 
@@ -81,9 +87,9 @@ categories: ["Backend"]
 
 most asynchronous operations can be classified into I/O-bound tasks (handled by the operating system) or CPU-bound tasks (offloaded to the thread pool). However, there are some asynchronous operations that don't fit neatly into these categories. These include operations that are purely managed within the JavaScript runtime or those that are part of the Node.js core but do not directly interact with the operating system.
 
-So you mean it's the asynchronous operation which is neither heavy task nor operating system, the event loop is executed by itself?
+asynchronous operation is neither a heavy task nor related to the operating system, and that the event loop executes by itself?
 
-Yes, that's correct. For asynchronous operations in Node.js that are neither heavy CPU-bound tasks nor directly interacting with the operating system (such as file I/O), the event loop manages their execution internally within the JavaScript runtime environment.
+Yes, For asynchronous operations in Node.js that are neither heavy CPU-bound tasks nor directly interacting with the operating system (such as file I/O), the event loop manages their execution internally within the JavaScript runtime environment.
 
 Here’s a concise breakdown:
 
