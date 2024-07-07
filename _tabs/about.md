@@ -76,7 +76,8 @@ Natours is a fictional nature tours booking website built for learning purposes.
 
 ## Contact
 
-- **Email:** [amrrdev@gmail.com](amrrdev@gmail.com])
+<!-- - **Email:** [amrrdev@gmail.com](amrrdev@gmail.com]) -->
+
 - **GitHub:** [https://github.com/amrrdev](https://github.com/amrrdev)
 - **LinkedIn:** [https://www.linkedin.com/in/amr-a-mubarak-282928262/](https://linkedin.com/in/amr-a-mubarak-282928262/)
 
