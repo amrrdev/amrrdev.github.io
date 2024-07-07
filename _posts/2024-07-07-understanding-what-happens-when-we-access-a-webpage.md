@@ -1,4 +1,5 @@
 The request-response model defines a communication pattern where a client sends a request to a server, and the server responds with a corresponding response.
+![Alt text](./../req-res1.png)
 
 ## 1. DNS Lookup
 
@@ -43,6 +44,8 @@ The server processes the request and sends back an HTTP response, which includes
 1. **SSL/TLS Handshake (for HTTPS):** If the connection is secure (HTTPS), an SSL/TLS handshake occurs to encrypt the communication between the client and server.
 2. **Caching:** The browser checks if it has a cached version of the resource. If valid, it can serve the resource from the cache instead of requesting it from the server.
 3. **Rendering:** The browser parses the HTML, CSS, and JavaScript to render the webpage for the user.
+
+![Alt text](./../req-res2.png)
 
 ## Conclusion
 
