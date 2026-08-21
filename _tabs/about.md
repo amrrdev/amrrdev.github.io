@@ -12,31 +12,6 @@ I work on distributed systems, databases and reliability. My focus is on replica
 
 ---
 
-### What this site is
+## Let's connect
 
-Practical writing on distributed systems, databases and reliability.
-
-I write about how systems behave under pressure and share notes from building dependable software. This includes dealing with network failures, full disks, queue overflow and retry handling.
-
-Every article aims to be:
-
-- Deep, covering mechanisms, data structures and failure modes
-- Observable, with code, packet layouts and traces you can reproduce with strace, perf or a small Go program
-- Useful, with clear mental models you can explain in an interview
-
----
-
-### What you'll find here
-
-- Database Internals: B+ Trees, WAL and crash recovery, MVCC, isolation, indexing and storage engines
-- Distributed Systems: replication, partitioning, consistency models and distributed transactions
-- System Design and Reliability: caching, load balancing, job queues, idempotency and backpressure
-- System Engineering Series: a structured path from Systems Programming Foundations to production, organized as Series to Stages to Articles. Start at [Series](/series/) for the full roadmap
-
-Browse by [Categories](/categories/), [Tags](/tags/) or [Archives](/archives/).
-
----
-
-### Let's connect
-
-Find me on [GitHub](https://github.com/amrrdev), [X @AmrAMubarak](https://x.com/AmrAMubarak), [LinkedIn](https://www.linkedin.com/in/amramubarak/) or reach out at amrrdev@gmail.com.
+Find me on [GitHub](https://github.com/amrrdev), [X @AmrAMubarak](https://x.com/AmrAMubarak), [LinkedIn](https://www.linkedin.com/in/amramubarak/) or reach out at <amrrdev@gmail.com>.
