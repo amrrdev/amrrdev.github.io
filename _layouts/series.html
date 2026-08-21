@@ -1,0 +1,158 @@
+---
+layout: page
+# Series layout - supports flat series and nested series -> stages
+---
+
+{% include lang.html %}
+
+{% assign series_posts = site.posts | where_exp: 'post', 'post.series' %}
+{% assign grouped = series_posts | group_by: 'series' | sort: 'name' %}
+
+{% if grouped.size == 0 %}
+  <p class="text-muted">No series yet. Add <code>series</code> and <code>series_order</code> to post front matter. For nested use <code>series</code> (root) + <code>stage</code> + <code>stage_order</code>.</p>
+{% else %}
+  {% assign HEAD_PREFIX = 'h_' %}
+  {% assign LIST_PREFIX = 'l_' %}
+  {% assign group_index = 0 %}
+
+  <div class="series-overview mb-4 text-muted small">
+    <i class="fas fa-layer-group me-1"></i>
+    {{ grouped.size }} series • {{ series_posts.size }} posts
+  </div>
+
+  {% for g in grouped %}
+    {% assign series_name = g.name %}
+    {% assign posts = g.items | sort: 'series_order' %}
+    {% assign posts_size = posts.size %}
+
+    {% comment %} Detect if this series uses stages {% endcomment %}
+    {% assign has_stage = false %}
+    {% for p in posts %}
+      {% if p.stage %}
+        {% assign has_stage = true %}
+        {% break %}
+      {% endif %}
+    {% endfor %}
+
+    <div class="card categories mb-4">
+      <!-- series header -->
+      <div
+        id="{{ HEAD_PREFIX }}{{ group_index }}"
+        class="card-header d-flex justify-content-between align-items-center"
+      >
+        <span class="ms-2 d-flex align-items-center gap-2 flex-wrap">
+          <i class="fas fa-layer-group fa-fw text-primary"></i>
+          <a href="#{{ HEAD_PREFIX }}{{ group_index }}" class="mx-1 fw-semibold text-decoration-none">{{ series_name }}</a>
+          <span class="text-muted small fw-light">
+            {{ posts_size }} {% if posts_size > 1 %}posts{% else %}post{% endif %}
+            {% if has_stage %}
+              {% assign stage_count = posts | map: 'stage' | uniq | size %}
+              • {{ stage_count }} stage{% if stage_count > 1 %}s{% endif %}
+            {% endif %}
+          </span>
+        </span>
+
+        <a
+          href="#{{ LIST_PREFIX }}{{ group_index }}"
+          data-bs-toggle="collapse"
+          aria-expanded="true"
+          aria-label="{{ HEAD_PREFIX }}{{ group_index }}-trigger"
+          class="category-trigger"
+        >
+          <i class="fas fa-fw fa-angle-down"></i>
+        </a>
+      </div>
+
+      <div id="{{ LIST_PREFIX }}{{ group_index }}" class="collapse show" aria-expanded="true">
+        {% if has_stage %}
+          {% comment %} Build ordered stage list by stage_order {% endcomment %}
+          {% assign sorted_by_stage = posts | sort: 'stage_order' %}
+          {% assign stages = '' | split: '' %}
+          {% for post in sorted_by_stage %}
+            {% unless stages contains post.stage %}
+              {% assign stages = stages | push: post.stage %}
+            {% endunless %}
+          {% endfor %}
+
+          {% for stage_name in stages %}
+            {% assign stage_posts = posts | where: 'stage', stage_name | sort: 'series_order' %}
+            {% assign stage_first = stage_posts | first %}
+            {% assign stage_idx = forloop.index0 %}
+            <div class="stage-block border-top">
+              <div
+                id="{{ HEAD_PREFIX }}{{ group_index }}_stage{{ stage_idx }}"
+                class="card-header d-flex justify-content-between align-items-center py-2"
+              >
+                <span class="ms-2 d-flex align-items-center gap-2">
+                  <i class="far fa-folder fa-fw"></i>
+                  <span class="fw-medium small">{{ stage_name }}</span>
+                  <span class="text-muted small">— {{ stage_posts.size }} post{% if stage_posts.size > 1 %}s{% endif %}</span>
+                </span>
+                <span class="d-flex align-items-center gap-2">
+                  {% if stage_first.stage_order != nil %}
+                    <span class="badge bg-secondary small">Stage {{ stage_first.stage_order }}</span>
+                  {% endif %}
+                  <a
+                    href="#{{ LIST_PREFIX }}{{ group_index }}_stage{{ stage_idx }}"
+                    data-bs-toggle="collapse"
+                    aria-expanded="true"
+                    aria-label="{{ HEAD_PREFIX }}{{ group_index }}_stage{{ stage_idx }}-trigger"
+                    class="category-trigger"
+                  >
+                    <i class="fas fa-fw fa-angle-down"></i>
+                  </a>
+                </span>
+              </div>
+              <div id="{{ LIST_PREFIX }}{{ group_index }}_stage{{ stage_idx }}" class="collapse show" aria-expanded="true">
+                <ul class="list-group list-group-flush">
+                {% for post in stage_posts %}
+                  <li class="list-group-item d-flex justify-content-between align-items-start gap-3 ps-4">
+                    <div class="d-flex gap-2 align-items-start flex-grow-1">
+                      <span class="badge bg-secondary mt-1" style="min-width:2.2rem;">#{{ post.series_order }}</span>
+                      <div>
+                        <a href="{{ post.url | relative_url }}" class="fw-medium">{{ post.title }}</a>
+                        <div class="text-muted small">
+                          {% if post.categories.size > 0 %}
+                            <i class="far fa-folder-open fa-fw me-1"></i>{{ post.categories | join: ', ' }}
+                            <span class="mx-1">•</span>
+                          {% endif %}
+                          {% include datetime.html date=post.date lang=lang %}
+                        </div>
+                      </div>
+                    </div>
+                    <i class="fas fa-angle-right text-muted small mt-2 d-none d-md-block"></i>
+                  </li>
+                {% endfor %}
+              </ul>
+              </div>
+            </div>
+          {% endfor %}
+        {% else %}
+          <!-- flat series -->
+          <ul class="list-group">
+            {% for post in posts %}
+              <li class="list-group-item d-flex justify-content-between align-items-start gap-3">
+                <div class="d-flex gap-2 align-items-start flex-grow-1">
+                  <span class="badge bg-secondary mt-1" style="min-width:2.2rem;">#{{ post.series_order }}</span>
+                  <div>
+                    <a href="{{ post.url | relative_url }}" class="fw-medium">{{ post.title }}</a>
+                    <div class="text-muted small">
+                      {% if post.categories.size > 0 %}
+                        <i class="far fa-folder-open fa-fw me-1"></i>{{ post.categories | join: ', ' }}
+                        <span class="mx-1">•</span>
+                      {% endif %}
+                      {% include datetime.html date=post.date lang=lang %}
+                    </div>
+                  </div>
+                </div>
+                <i class="fas fa-angle-right text-muted small mt-2 d-none d-md-block"></i>
+              </li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      </div>
+    </div>
+
+    {% assign group_index = group_index | plus: 1 %}
+  {% endfor %}
+{% endif %}

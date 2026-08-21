@@ -3,6 +3,8 @@ title: "Implementing a Write-Ahead Log in Go"
 date: 2026-05-04
 categories: ["Database Internals"]
 tags: [wal, write-ahead-log, golang, database-internals]
+series: "Building an LSM-Tree Storage Engine in Go"
+series_order: 1
 ---
 ## Implementing a Write-Ahead Log in Go
 

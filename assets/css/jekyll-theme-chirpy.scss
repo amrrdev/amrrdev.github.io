@@ -1,0 +1,45 @@
+---
+---
+
+@use 'abstracts/variables' with (
+  $theme: '{{ site.theme_mode }}'
+);
+
+/* prettier-ignore */
+@use 'main
+{%- if jekyll.environment == 'production' -%}
+  .bundle
+{%- endif -%}
+';
+
+/* append your custom style below */
+
+/* Mermaid: make diagrams larger but fully visible */
+.mermaid {
+  text-align: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 1rem 0;
+  margin: 1.5rem 0;
+  background: transparent;
+  display: block;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mermaid svg {
+  max-width: 100% !important;
+  width: 100% !important;
+  height: auto !important;
+  display: block;
+  margin: 0 auto;
+}
+
+/* Ensure mermaid code block wrapper doesn't clip */
+.language-mermaid,
+pre.language-mermaid {
+  background: transparent !important;
+  border: none !important;
+}
+
+/* Optional: allow fullscreen on click? Keep simple */

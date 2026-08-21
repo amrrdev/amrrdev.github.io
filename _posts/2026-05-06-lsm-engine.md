@@ -3,6 +3,8 @@ title: "Building an LSM-Tree Storage Engine in Go, Part 2: The Memtable"
 date: 2026-05-06
 categories: ["Database Internals"]
 tags: [lsm-tree, memtable, storage-engine, golang]
+series: "Building an LSM-Tree Storage Engine in Go"
+series_order: 2
 ---
 ## Where We Are
 
