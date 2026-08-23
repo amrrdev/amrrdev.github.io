@@ -117,7 +117,7 @@ The transition is not the same as a normal function call. A normal call changes 
 On Linux x86-64, the conventional raw syscall register arrangement is:
 
 | Meaning | Register |
-|---|---|
+| --- | --- |
 | System-call number | `rax` |
 | First argument | `rdi` |
 | Second argument | `rsi` |
