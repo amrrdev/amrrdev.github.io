@@ -7,7 +7,7 @@ tags: [Process and thread scheduling, Preemptive scheduling, Linux scheduling to
 series: "System Engineering"
 stage: "Stage 2 - Linux and Operating System Internals"
 stage_order: 2
-series_order: 4
+series_order: 5
 ---
 
 > Stage 2 — Linux and Operating System Internals  
