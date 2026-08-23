@@ -3,7 +3,7 @@ mermaid: true
 title: "Linux Filesystem and System Interfaces"
 date: 2026-08-23
 categories: ["System Engineering"]
-tags: [Process namespaces, Process credentials, Process memory and resource accounting]
+tags: [/proc, /sys, /dev, dmesg]
 series: "System Engineering"
 stage: "Stage 2 - Linux and Operating System Internals"
 stage_order: 2
