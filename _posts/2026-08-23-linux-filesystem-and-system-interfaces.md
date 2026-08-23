@@ -49,9 +49,9 @@ The file-like design is useful because programs already know how to open, read, 
 ```mermaid
 flowchart LR
     Tool[Inspection tool] --> Open[open/read/write interface]
-    Open --> Proc[/proc]
-    Open --> Sys[/sys]
-    Open --> Dev[/dev]
+    Open --> Proc["/proc"]
+    Open --> Sys["/sys"]
+    Open --> Dev["/dev"]
     Proc --> Kernel[Kernel runtime state]
     Sys --> Kernel
     Dev --> Driver[Device driver or kernel resource]
