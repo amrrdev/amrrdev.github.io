@@ -55,7 +55,7 @@ For example, a small command-line tool, a kernel component, a high-throughput pr
 ## A practical comparison
 
 | Concern | C | Rust | Zig | Go |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | Memory | Manual | Ownership and borrowing, with controlled unsafe code | Explicit allocation, manual lifetime | Garbage-collected runtime |
 | Runtime | Small and platform-dependent | Usually small, configurable | Minimal by default | Includes runtime and garbage collector |
 | Memory safety | Mostly programmer responsibility | Many errors prevented at compile time | Mostly programmer responsibility with explicit tools | Strong runtime memory safety, but not all resource safety |
