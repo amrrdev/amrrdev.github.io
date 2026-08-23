@@ -386,12 +386,12 @@ The following Go function reads a process's status file. It uses an ordinary fil
 
 ```go
 func processStatus(pid int) ([]byte, error) {
-	path := fmt.Sprintf("/proc/%d/status", pid)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	return data, nil
+ path := fmt.Sprintf("/proc/%d/status", pid)
+ data, err := os.ReadFile(path)
+ if err != nil {
+  return nil, fmt.Errorf("read %s: %w", path, err)
+ }
+ return data, nil
 }
 ```
 
