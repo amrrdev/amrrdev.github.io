@@ -65,17 +65,17 @@ layout: page
 
       <div id="{{ LIST_PREFIX }}{{ group_index }}" class="collapse show" aria-expanded="true">
         {% if has_stage %}
-          {% comment %} Build ordered stage list newest stage first (by latest post date) {% endcomment %}
-          {% assign sorted_by_date = posts | sort: 'date' | reverse %}
+          {% comment %} Build ordered stage list by stage_order front matter {% endcomment %}
+          {% assign sorted_by_stage = posts | sort: 'stage_order' %}
           {% assign stages = '' | split: '' %}
-          {% for post in sorted_by_date %}
+          {% for post in sorted_by_stage %}
             {% unless stages contains post.stage %}
               {% assign stages = stages | push: post.stage %}
             {% endunless %}
           {% endfor %}
 
           {% for stage_name in stages %}
-            {% assign stage_posts = posts | where: 'stage', stage_name | sort: 'date' | reverse %}
+            {% assign stage_posts = posts | where: 'stage', stage_name | sort: 'series_order' %}
             {% assign stage_first = stage_posts | first %}
             {% assign stage_idx = forloop.index0 %}
             <div class="stage-block border-top">
@@ -129,8 +129,9 @@ layout: page
           {% endfor %}
         {% else %}
           <!-- flat series -->
+          {% assign flat_posts = posts | sort: 'series_order' %}
           <ul class="list-group">
-            {% for post in posts %}
+            {% for post in flat_posts %}
               <li class="list-group-item d-flex justify-content-between align-items-start gap-2 gap-md-3 ps-2 ps-md-4">
                 <div class="d-flex gap-2 align-items-start flex-grow-1" style="min-width:0;">
                   <span class="badge bg-secondary mt-1 flex-shrink-0" style="min-width:2.2rem;">#{{ post.series_order }}</span>
