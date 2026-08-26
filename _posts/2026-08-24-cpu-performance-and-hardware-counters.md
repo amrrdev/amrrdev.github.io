@@ -3,7 +3,7 @@ mermaid: true
 title: "CPU Performance and Hardware Counters"
 date: 2026-08-24
 categories: ["System Engineering"]
-tags: [IPC, Cycles, Registers, Thermal throttling, Turbo behavior]
+tags: [cpu, performance, ipc, perf, hardware-counters]
 series: "System Engineering"
 stage: "Stage 3 — Hardware and Computer Architecture"
 stage_order: 3
@@ -422,13 +422,13 @@ The most useful production question is usually not “what is the CPU doing glob
 
 **“Hardware counters are exact and universal.”** Event definitions, availability, skid, multiplexing, virtualization, and kernel support vary by processor and environment. Treat counter output as evidence with a measurement context.
 
-## What to remember
+## Summary
 
 CPU performance is not explained by clock speed alone. A useful first model is instruction count, cycles per instruction, and effective frequency. Hardware counters help connect that model to reality by showing how much work retired, how many cycles were spent, and which events may be contributing to stalls.
 
-The disciplined approach is to measure before changing code, form a specific hypothesis, select counters that can test it, inspect the generated instructions, and repeat the experiment. Counters do not replace understanding; they make your explanation testable.
+The disciplined approach is to measure before changing code, form a specific hypothesis about where time goes, select counters that can test it, look at the generated instructions, and repeat the experiment. Counters do not replace understanding; they make your explanation testable.
 
-## Optional project for your next break
+## If you want to build this later
 
 Build a **microbenchmark and counter report tool**. It should run several small workloads, measure wall-clock time, and invoke or document the relevant `perf stat` commands. For each workload, report instructions, cycles, IPC, branches, branch misses, and cache events when available.
 

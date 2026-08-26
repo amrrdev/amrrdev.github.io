@@ -3,7 +3,7 @@ mermaid: true
 title: "CPU Caches and Memory Locality"
 date: 2026-08-24
 categories: ["System Engineering"]
-tags: [Coherence, False Sharing, Prefetching]
+tags: [cpu, caches, locality, coherence, false-sharing]
 series: "System Engineering"
 stage: "Stage 3 — Hardware and Computer Architecture"
 stage_order: 3
@@ -405,13 +405,13 @@ Then test one change at a time. Reorder fields, change the layout, block the ope
 
 **“Changing a structure to a structure-of-arrays layout is automatically better.”** It may improve a hot field-wise loop but make whole-object operations less convenient or increase complexity. Layout should follow the dominant workload.
 
-## What to remember
+## Summary
 
 The CPU moves data in cache lines, not in isolated source-level variables. A cache hit is fast because the required line is already nearby; a miss requires data to travel through a slower part of the hierarchy. Programs run well when they reuse data and access nearby addresses in patterns the hardware can predict.
 
-The important performance concepts are capacity, locality, latency, bandwidth, and coherence. A single thread can suffer from poor locality, while multiple threads can suffer from cache-line movement and false sharing. The right fix depends on the actual access pattern, so inspect the data layout and measure the workload instead of applying cache advice mechanically.
+The important concepts are capacity, locality, latency, bandwidth, and coherence. A single thread can suffer from poor locality, for example scanning a matrix in the wrong order for how it is stored, while multiple threads can suffer from cache-line movement and false sharing when they update nearby counters. The right fix depends on the actual access pattern, so look at the hot data layout and measure the workload instead of applying cache advice mechanically.
 
-## Optional project for your next break
+## If you want to build this later
 
 Build a **cache locality laboratory**. Implement benchmarks for sequential access, different strides, row-major versus column-major matrix traversal, array-of-structures versus structure-of-arrays layouts, and two counters that either share or avoid a cache line.
 

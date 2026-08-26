@@ -3,7 +3,7 @@ mermaid: true
 title: "System Calls: How Programs Request Kernel Services"
 date: 2026-08-22
 categories: ["System Engineering"]
-tags: [Library calls, Linux x86-64 syscall registers, File descriptors]
+tags: [linux, system-calls, syscall, file-descriptors, strace]
 series: "System Engineering"
 stage: "Stage 2 - Linux and Operating System Internals"
 stage_order: 2
@@ -17,19 +17,22 @@ series_order: 2
 
 ## The short version
 
-A system call is a controlled entry point through which a user-space program asks the operating-system kernel to perform a privileged operation. Opening a file, creating a process, allocating a memory mapping, reading from a socket, and sending data to a device all eventually depend on system calls or kernel-managed interfaces.
+A system call is a controlled entry point through which a user-space program asks the kernel to perform a privileged operation. A useful way to picture it is as a gate between user space and the kernel. The program puts in a number and arguments, the CPU switches to privileged mode, the kernel checks permissions and the user pointers, does the work or schedules it, and returns a result or an error.
 
-The program supplies a system-call number and arguments. The processor changes from user mode to a privileged kernel mode. The kernel validates the request, checks the process's permissions and resources, performs or schedules the operation, and returns a result or error.
+Opening a file, creating a process, allocating a memory mapping, or reading from a socket all go through this gate. The boundary matters because it connects ordinary backend code to protected state, and the kernel cannot trust the pointers, lengths, or file descriptors it is given. For a backend, whether a `read` returns 0, a short count, or `-1` with `EAGAIN` decides whether an HTTP handler sees end of file, needs to retry, or should apply backpressure.
 
-The system-call boundary matters because it connects ordinary code to protected state. The kernel cannot trust the program's pointers, lengths, file descriptors, or requested operations. It must validate them before touching kernel memory or hardware.
+
 
 ## Where this article fits
 
-The previous article explained that the operating system provides controlled services to user-space programs. This article explains the main mechanism used to request many of those services.
+The previous article gave the OS model overview. This article explains the *mechanism* that implements it.
+
+**Prerequisites:** What the Operating System Provides — the services that need a gate.  
+**Next:** Linux Processes and Lifecycle — the resource that uses those gates to be created.
 
 Later articles will explain the resources that system calls operate on: processes, memory, files, sockets, devices, and scheduling. This article gives us the common path they share.
 
-The concrete register details in this article use Linux on x86-64 as the example. Other operating systems and CPU architectures use different instruction sequences, syscall numbers, registers, and calling conventions. The general idea remains the same: a program crosses a protected interface and the kernel validates the request.
+> Platform note: Register details use **Linux x86-64** as example (`rax` number, `rdi/rsi/rdx/r10/r8/r9` args). ARM64 uses `x8` for number, `x0-x5` for args and `svc` instruction; macOS/Windows use different numbers. The *validated gate* idea is the same.
 
 ## Why a program cannot simply call the kernel's functions
 

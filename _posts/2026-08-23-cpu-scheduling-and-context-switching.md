@@ -3,178 +3,126 @@ mermaid: true
 title: "CPU Scheduling and Context Switching"
 date: 2026-08-23
 categories: ["System Engineering"]
-tags: [Process and thread scheduling, Preemptive scheduling, Linux scheduling tools]
+tags: [linux, scheduling, context-switch, cpu]
 series: "System Engineering"
 stage: "Stage 2 - Linux and Operating System Internals"
 stage_order: 2
-series_order: 5
+series_order: 7
 ---
 
 > Stage 2 — Linux and Operating System Internals  
 > Subject area 2.2 — Scheduling and Resource Control  
-> Article 1
+> Article 7
 
 ## The short version
 
-A CPU can execute only a limited number of threads at the same time. A machine may have many processes and thousands of threads, so the operating system scheduler decides which runnable thread should run on which CPU and when another thread should get a turn.
+A machine may have a few CPUs and many threads that want to run. The kernel's scheduler decides which thread runs on which CPU and when to give the CPU to another thread.
 
-The scheduler tries to balance several goals: fair access to CPU time, good interactive response, high throughput, priority requirements, and support for real-time work. These goals can conflict. Giving one task more CPU can delay another. Running too many threads can create waiting and context-switch overhead instead of more useful work.
+The scheduler tries to be fair, keep the system responsive, and handle priorities, but those goals can conflict. Giving one thread more time can delay another. Running many more threads than there are CPUs creates waiting and extra work to switch between them.
 
-A context switch occurs when the CPU stops running one thread and resumes another. The kernel saves enough execution state for the old thread and restores the state of the new one. The switch itself has a cost, and the new thread may also lose useful CPU-cache and translation-cache locality.
+A context switch is what happens when the CPU stops running one thread and starts another. The kernel saves the first thread's registers and restores the second thread's registers. The switch itself costs time, and the new thread may find that its data is no longer close in the caches.
 
-The central question is:
-
-> When more work wants the CPU than can run immediately, how does Linux decide what runs next, and what does that decision cost?
+The central question is how the system decides what runs next when there is more work than can run at once, and what that decision costs.
 
 ## Where this article fits
 
-The previous article explained how Linux exposes process state and how engineers inspect live systems. This article explains one of the most important pieces of that state: whether a thread is running, runnable, or waiting, and how it receives CPU time.
+The previous articles showed how to observe live process state through `/proc` and how time is measured. This article explains the part of that state that says whether a thread is running, ready to run but waiting for a CPU, or waiting for something else.
 
-Later articles will connect scheduling to processes, threads, synchronization, memory locality, NUMA, containers, real-time systems, and performance profiling.
+Later articles will connect this to threads, locks, caches, and resource limits. Scheduling is where the resource called CPU time is shared, and where contention first appears as waiting.
 
-## A process is not the scheduler's smallest unit
+## The smallest unit the scheduler works with
 
-Linux schedules threads. A process is a resource and isolation container that may contain one or many threads.
+On Linux the scheduler works with threads, not whole processes. A process is a container for resources like an address space and file descriptors. Inside it there can be one or many threads that share that address space.
 
-A single-threaded process has one schedulable execution path. A multi-threaded process has several threads that can run independently and share the process's address space and many resources.
+A process with one thread has one path of execution that the scheduler can choose. A process with three threads has three paths that can be chosen independently, even though they share the same memory and file descriptors.
 
 ```mermaid
 flowchart TD
-    Process[Process: address space and resources]
+    Process[Process has address space and resources]
     Process --> T1[Thread 1]
     Process --> T2[Thread 2]
     Process --> T3[Thread 3]
-    T1 --> CPU[Scheduler chooses runnable threads]
+    T1 --> CPU[Scheduler picks among runnable threads]
     T2 --> CPU
     T3 --> CPU
 ```
 
-This distinction matters when interpreting CPU usage. A process may report high CPU usage because one thread is busy, or because many threads are running. A process with many threads can still make little progress if most threads are blocked or competing for a lock.
+This matters when you read CPU usage. A process can show high usage because one thread is busy, or because many threads are each a little busy. A process with many threads can still make slow progress if most of them are waiting for the same lock.
 
-## Thread states
+## States a thread moves through
 
-A thread is not continuously running. It moves through states as it executes, waits, and stops.
+A thread is not always running. It moves between a few states as it runs, waits, and finishes.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Runnable
-    Runnable --> Running: scheduled on a CPU
-    Running --> Runnable: preempted or yields
-    Running --> Sleeping: waits for I/O, lock, timer, or event
-    Sleeping --> Runnable: event becomes ready
-    Running --> Stopped: signal or debugger
-    Stopped --> Runnable: continued
-    Running --> Exited: thread finishes
+    Runnable --> Running: scheduler puts it on a CPU
+    Running --> Runnable: its turn ends or it is interrupted
+    Running --> Sleeping: it waits for disk, network, lock, or timer
+    Sleeping --> Runnable: the thing it waited for is ready
+    Running --> Stopped: signal or debugger stops it
+    Stopped --> Runnable: it is continued
+    Running --> Exited: it finishes
     Exited --> [*]
 ```
 
-### Running
+A running thread is currently on a CPU executing instructions. A thread that is runnable is ready to run but is not on a CPU. It may be waiting because all CPUs are busy or because another thread has higher priority in the scheduling policy. Runnable is different from sleeping. A runnable thread wants a CPU now. A sleeping thread is waiting for something else and should not be given a CPU until that thing happens. A stopped thread is not allowed to run until it is continued, for example after `SIGSTOP` or when a debugger stops it.
 
-A running thread is currently executing instructions on a CPU.
+## Why the kernel has to decide
 
-### Runnable
-
-A runnable thread is ready to execute but is not currently running. It may be waiting for a CPU because all CPUs are busy, because another thread has a higher scheduling priority, or because it is waiting for its turn under the scheduler's policy.
-
-Runnable is different from sleeping. A runnable thread needs CPU time. A sleeping thread is waiting for another event and does not need to be scheduled until that event occurs.
-
-### Sleeping or blocked
-
-A sleeping thread is waiting for something such as data from a file or socket, a lock, a timer, a child process, or a condition variable. The operating system can run other work while it waits.
-
-### Stopped
-
-A stopped thread is not allowed to run until it is continued. A debugger or signals such as `SIGSTOP` can stop it.
-
-## Why scheduling is necessary
-
-If one thread ran forever without interruption, other programs could not make progress. The operating system uses scheduling to share CPUs and prevent one normal process from taking all available execution time.
+If one thread could run forever without being interrupted, no other thread would make progress. The kernel therefore shares the CPUs.
 
 ```mermaid
 flowchart LR
-    A[Runnable thread A] --> Queue[Run queue]
+    A[Runnable thread A] --> Queue[Queue of runnable threads]
     B[Runnable thread B] --> Queue
     C[Runnable thread C] --> Queue
-    Queue --> Select[Scheduler decision]
-    Select --> CPU0[CPU 0]
-    Select --> CPU1[CPU 1]
+    Queue --> Decision[Scheduler chooses]
+    Decision --> CPU0[CPU 0]
+    Decision --> CPU1[CPU 1]
 ```
 
-On a multi-core system, several threads can run at the same time, but there may still be more runnable threads than CPUs. Each CPU has scheduling work associated with it, and the kernel may move runnable threads between CPUs to balance work.
+On a machine with several cores, several threads run at once, but there can still be more runnable threads than cores. Each CPU has its own queue, and the kernel may move threads between CPUs to balance the load.
 
-## Preemptive scheduling
+## The kernel can interrupt a running thread
 
-Preemptive scheduling means that the operating system can interrupt a running thread and give the CPU to another thread. The thread does not need to voluntarily call a yield function for this to happen.
+On Linux the scheduler is preemptive, which means the kernel can interrupt a running thread and give the CPU to another thread. The running thread does not have to call a function to give up the CPU for this to happen. This protects fairness. A program that does a lot of computation and never waits would otherwise keep the CPU forever.
 
-Preemption is important for fairness and responsiveness. A CPU-bound program that never blocks or yields should not prevent other normal programs from running.
+The kernel may make a new decision after a timer interrupt, after a thread becomes runnable, after a running thread blocks, after a priority changes, after a CPU becomes idle, or after a system call returns.
 
-The kernel can make a scheduling decision after events such as:
+Interrupting has a cost. The kernel must save the thread's registers, choose the next thread, and restore its registers. Doing this very often helps the system feel responsive, but it adds overhead and makes caches less effective.
 
-- A timer interrupt
-- A thread becoming runnable
-- A running thread blocking
-- A thread changing priority
-- A CPU becoming idle
-- A system call returning
-- A higher-priority task becoming available
+## Programs should still wait in a good way
 
-Preemption has a cost. The kernel must preserve the interrupted thread's state, choose another thread, restore its state, and return to execution. Frequent preemption can reduce cache locality and increase overhead.
-
-## Cooperative behavior still matters
-
-Even with preemptive scheduling, programs should cooperate with the system by blocking when they have no work, waiting efficiently, releasing locks, and avoiding busy loops.
-
-A busy loop repeatedly checks a condition while consuming CPU:
+Even though the kernel can interrupt, programs should not waste CPU. A common waste is a loop that keeps checking whether work is available without sleeping.
 
 ```c
 while (!work_available) {
-    // Repeatedly checking without sleeping or blocking.
+    // keeps using the CPU while checking
 }
 ```
 
-If `work_available` changes rarely, this wastes CPU that could run other work. A condition variable, event, file descriptor, timer, or another blocking mechanism lets the thread sleep until progress is possible.
+If `work_available` changes rarely, this loop burns a CPU that could do useful work. A better way is to wait for an event, a condition variable, a file descriptor, or a timer, so the thread sleeps until there is something to do.
 
-Preemption prevents starvation in many normal cases, but it does not make busy waiting free.
+An interrupt guarantees that a busy thread does not starve others forever, but it does not make busy waiting free.
 
-## Scheduling policies and priorities
+## Priorities and fairness
 
-The scheduler uses policies and priorities to decide which runnable work should run. Linux supports normal scheduling behavior for ordinary tasks and special policies for real-time or deadline-sensitive work.
+The scheduler uses a policy and priorities to decide which runnable thread should run. For ordinary work, the policy tries to share CPU time fairly and keep the system responsive. A nice value can give a hint. A program that is nicer lets other programs run more, while a less nice program asks for more CPU.
 
-For ordinary workloads, the scheduler aims to distribute CPU time fairly while keeping the system responsive. A process's nice value can influence its relative priority: a nicer process gives other work more preference, while a less nice process requests more CPU preference.
+There are also policies for work with deadlines. They can give a thread stronger priority, but if they are used without care they can starve ordinary work. A priority is not the same as business importance. Giving a thread a high kernel priority means it will run even when that makes other work miss its deadline, so the choice should consider the whole machine.
 
-Real-time policies can give tasks stronger scheduling priority or deadline behavior. They are useful for specific workloads, but they can also starve normal tasks if used incorrectly.
+Fairness does not mean every thread gets the same amount of time. A thread that is sleeping should not get CPU while it has nothing to do. A thread in a group that is limited by a control group may get less than a thread in another group. The exact algorithm changes across kernel versions, so it is better to think in terms of policy, priority, whether a thread is runnable, and measured waiting time, rather than memorizing one implementation.
 
-Priority is not the same as importance in a business sense. If a task has a high operating-system priority, it may receive CPU time even when that causes other tasks to miss their deadlines. Priority decisions should be made with the whole system in mind.
+## Time slices
 
-## Fairness and starvation
+You may hear about a time slice as the amount of time a thread can run before the scheduler considers another thread. Modern Linux is more complex than giving every thread a fixed slice, but the idea is still useful. A thread that runs briefly and then blocks may get many chances to run without ever using a full slice. A thread that runs continuously may be interrupted so others get a turn.
 
-Fairness means that runnable work receives a reasonable share of CPU according to the scheduling policy and priority. Starvation occurs when a runnable task waits for an unacceptably long time because other work continually receives preference.
-
-Fairness is not always equal CPU time. A high-priority task may intentionally receive more CPU. A task that is sleeping should not receive CPU while it has no work. A task in a constrained control group may have a smaller share than a task in another group.
-
-The scheduler's implementation changes across Linux versions and configurations. It is better to reason in terms of policies, priorities, runnable work, waiting time, and observed behavior than to memorize one internal algorithm as if it were permanent.
-
-## Time slices and scheduling periods
-
-A time slice is a period during which a thread may run before the scheduler considers giving another runnable thread a turn. Modern Linux scheduling behavior is more complex than assigning every task a simple fixed slice, but the time-slice model is still useful for understanding preemption.
-
-The effective run time of a thread depends on the number of runnable tasks, their priorities, the scheduling class, blocking behavior, CPU affinity, and system events. A thread that runs for a short period and blocks may receive many opportunities to run without consuming an entire CPU.
-
-The scheduler tries to balance responsiveness and throughput. Very frequent switching improves interactivity but adds overhead. Very infrequent switching improves long-running throughput for CPU-bound tasks but can make interactive work feel slow.
+Very frequent switching makes the system feel quick, but it adds overhead. Very infrequent switching helps a long computation finish faster, but it can make interactive work feel slow. The scheduler balances the two.
 
 ## What a context switch does
 
-A context switch changes which thread is executing on a CPU. The kernel must preserve the old thread's execution state and restore the new thread's state.
-
-The state can include:
-
-- General-purpose registers
-- Instruction pointer
-- Stack pointer
-- Processor flags
-- Floating-point or vector state when relevant
-- Scheduling metadata
-- Memory-management state when the address space changes
+A context switch changes which thread a CPU runs. The kernel saves the execution state of the old thread and restores the state of the new thread. That state includes general registers, the instruction pointer, the stack pointer, flags, and when needed floating point state and scheduling information. If the next thread belongs to a different process, the kernel may also change the address space it uses.
 
 ```mermaid
 sequenceDiagram
@@ -183,129 +131,81 @@ sequenceDiagram
     participant A as Thread A
     participant B as Thread B
 
-    A->>CPU: Execute instructions
-    CPU->>Kernel: Timer, block, or scheduling event
-    Kernel->>Kernel: Save A's execution state
-    Kernel->>Kernel: Select B from runnable work
-    Kernel->>Kernel: Restore B's execution state
-    Kernel-->>CPU: Return to B
-    B->>CPU: Execute instructions
+    A->>CPU: running instructions
+    CPU->>Kernel: timer, block, or wakeup
+    Kernel->>Kernel: save state of A
+    Kernel->>Kernel: pick B from runnable queue
+    Kernel->>Kernel: restore state of B
+    Kernel-->>CPU: resume B
+    B->>CPU: running instructions
 ```
 
-The switch does not copy the entire process memory. It saves and restores the execution context needed to resume the thread. If the new thread belongs to another process, the kernel may also change the active address-space mapping.
+The switch does not copy all of the process's memory. It only saves and restores the registers and other execution state needed to resume. Changing the address space when switching processes can make it a bit more expensive, but modern hardware reduces some of that cost with tagged translation caches.
 
-## Thread switch versus process switch
+## Why a switch costs more than just saving registers
 
-Switching between two threads in the same process may be cheaper than switching between threads in different processes because the threads can share the same address space and some related state.
-
-Switching between processes may require changing the active memory-management context. Modern processors and operating systems reduce some of this cost with translation-cache identifiers and other techniques, but the cost can still differ.
-
-The exact cost depends on the CPU, kernel version, architecture, workload, cache state, and what the threads were doing. It is not accurate to assign one universal number to a context switch.
-
-## Why context switches cost more than register changes
-
-The direct state save and restore is only part of the cost. After a switch, the new thread may not find its useful instructions and data in the CPU caches. It may also experience translation-cache misses when accessing memory.
+Saving and restoring registers is only part of the cost. When a new thread starts, the data it needs may not be in the CPU caches. The instructions it will run and the data it touches may have to be fetched again.
 
 ```text
-Thread A's cache working set
-        ↓ switch
-Thread B's cache working set
-        ↓
-Some data and instructions must be fetched again
-        ↓
-CPU spends time waiting for cache and memory access
+Thread A had useful lines in the caches
+    switch to Thread B
+Thread B needs different lines, so some are fetched again
+    some of A's lines are evicted
 ```
 
-This is why a program with many threads can be slower even when every thread is individually efficient. The threads may constantly displace one another's working sets.
+If many threads take turns on the same CPUs, they keep displacing each other's working sets. The cost also includes the scheduler's own work, any contention on kernel locks, and the work to wake and sleep threads.
 
-Context-switch overhead also includes scheduler work, lock contention in kernel paths, CPU migrations, and the cost of waking and sleeping tasks.
+## Two reasons a switch happens
 
-## Voluntary and involuntary context switches
+A switch can happen because the running program asked to wait. For example, it tried to read from a socket with no data, wait for a lock, or sleep for a timer. In that case the kernel puts it to sleep and runs another thread. This kind of switch tells you the thread is waiting for something other than CPU.
 
-A voluntary context switch occurs when a thread gives up the CPU because it blocks or explicitly yields. It may be waiting for I/O, a lock, a timer, or another event.
+A switch can also happen because the kernel decided to interrupt the running thread. Its time was up, or another thread with higher priority became runnable. This tells you that many threads want CPU at the same time or that the system is preempting often.
 
-An involuntary context switch occurs when the scheduler interrupts a running thread because its time or priority relationship requires another decision, or because higher-priority runnable work became available.
+The distinction helps you debug. Many switches where threads give up the CPU suggest they wait for disk, network, or locks. Many switches where the kernel interrupts suggest many runnable threads competing for the same CPUs.
 
-The distinction helps diagnose behavior:
+Neither kind is automatically bad. The question is whether the waiting and the switching match what the workload should do.
 
-- Many voluntary switches may indicate heavy I/O or lock waiting.
-- Many involuntary switches may indicate CPU contention, high concurrency, or frequent preemption.
+## Moving between CPUs and keeping data close
 
-Neither type is automatically bad. The useful question is whether the switching and waiting match the workload and latency requirements.
+On a machine with many cores, a thread can run on different CPUs over time. Moving helps balance load, but it can hurt caches and memory locality. The new CPU may not have the thread's recent data, and on a NUMA machine some memory is cheaper to reach from one CPU than from another.
 
-## CPU migration and cache locality
+Pinning, which means restricting a thread to a set of CPUs, can make latency more predictable for a special workload or keep a thread near a device queue. It can also hurt when the chosen CPU becomes busy and the thread could have run elsewhere. The scheduler usually knows more about the overall balance than a single program, so pinning should be used only after measuring and for a clear reason like device affinity or real-time needs.
 
-On a multi-core system, a thread may run on different CPUs over time. Moving a thread can help load balancing, but it may reduce cache locality because the new CPU may not have the thread's working data in its local caches.
+Tools like `taskset` and `numactl` can show or set affinity, but they should be used with an understanding of the whole workload.
 
-CPU migration is especially important on NUMA systems, where memory access cost can depend on which CPU and memory node are involved. Pinning a thread to one CPU can improve predictability for a specialized workload, but it can also create imbalance if that CPU becomes overloaded.
+## When waiting is better than looping
 
-The default scheduler usually has more information than an application about balancing work. Pinning should be based on measurement and a clear reason such as latency isolation, cache locality, device affinity, or real-time behavior.
-
-## CPU affinity and pinning
-
-CPU affinity restricts a process or thread to a set of CPUs. Pinning is the stronger case where the set contains one or a small number of CPUs.
-
-Affinity can be useful for:
-
-- Keeping a latency-sensitive task away from noisy workloads
-- Matching a thread to a device interrupt or network queue
-- Improving cache locality
-- Isolating real-time work
-- Reducing migrations during a benchmark
-
-Affinity can be harmful when:
-
-- The selected CPU is overloaded
-- Work is unevenly distributed
-- The program has more runnable threads than allowed CPUs
-- Memory is remote on a NUMA system
-- The constraint prevents the scheduler from balancing bursts
-
-The command-line tools `taskset` and `numactl` can inspect or set affinity, but using them safely requires understanding the whole workload.
-
-## Blocking is better than spinning when no work exists
-
-A thread that has no work should usually block on an appropriate event instead of repeatedly polling.
+A thread that has nothing to do should usually wait for an event instead of looping.
 
 ```mermaid
 flowchart TD
-    Check[Does work exist?]
-    Check -->|Yes| Process[Process work]
-    Check -->|No, busy loop| Consume[Consume CPU while checking]
-    Check -->|No, block| Sleep[Sleep until event]
+    Check{Is there work?}
+    Check -->|yes| Do[Do the work]
+    Check -->|no, loop| Waste[Uses CPU checking again]
+    Check -->|no, wait| Sleep[Sleep until woken]
     Sleep --> Check
-    Process --> Check
+    Do --> Check
 ```
 
-Busy polling can be appropriate when the expected wait is extremely short and latency matters more than CPU efficiency. It is also used in specialized high-performance systems. For ordinary application work, blocking or event-driven waiting is usually a better tradeoff.
+Looping can be right when the wait is expected to be extremely short and every microsecond matters, or in specialized high-performance code. For ordinary work, waiting with an event, condition variable, or file descriptor uses far less CPU and leaves it for other threads.
 
-The decision depends on the cost of wake-up, expected wait time, CPU availability, and latency target.
+## Why more threads can make things slower
 
-## Too many threads
+Threads are not free. Each one needs a stack, kernel bookkeeping, and often application state. If many threads are runnable at once, they compete for the same CPUs and spend more time switching and waiting for locks.
 
-Threads are not free. Each thread needs a stack, scheduling state, kernel bookkeeping, and usually application-level state. If too many threads are runnable, they compete for CPUs and increase context switching.
+If most threads are waiting for disk or network, having many can be reasonable. If most are doing computation, the number that can usefully run at once is close to the number of CPUs that can do the work, after accounting for memory and locks.
 
-If most threads are blocked on I/O, a larger number may be reasonable. If most are CPU-bound, the useful number is usually related to available CPU capacity and the amount of parallel work.
+A thread pool makes the limit explicit, but its size should match the workload. Too small and work waits even though CPUs are free. Too large and memory grows, contention rises, and queueing hurts latency. The right question is not how many threads the machine can create, but how many concurrent operations the CPUs, memory, and dependencies can actually support.
 
-Thread pools make the bound explicit, but the correct size depends on the workload. A pool that is too small limits throughput. A pool that is too large increases memory use, contention, and queueing.
+## Real-time work
 
-The right question is not “How many threads can the machine create?” It is:
+Some work has deadlines that are more important than average speed. A hard real-time system must meet its deadlines under its stated conditions, while a soft real-time system tries but may miss occasionally. Policies that give a thread stronger priority can help protect that work, but a misconfigured real-time thread can also keep ordinary system threads from running at all.
 
-> How many concurrent operations can the CPU, memory, dependencies, and latency target support?
+Deadlines also depend on more than the scheduler. Interrupt handling, memory allocation that faults, locks, and device latency all affect whether a deadline is met. Choosing a real-time policy alone does not guarantee it.
 
-## Real-time scheduling
+## How to look at scheduling
 
-Real-time work has deadlines that matter more than average throughput. Hard real-time systems must guarantee deadlines under defined conditions. Soft real-time systems try to meet deadlines but may occasionally miss them.
-
-Real-time scheduling policies can give certain tasks strong priority or deadline treatment. This can protect critical work, but a misconfigured real-time task can prevent normal system tasks from running and make the machine unusable.
-
-Real-time behavior also depends on interrupt handling, memory allocation, page faults, locks, device latency, and other parts of the system. Choosing a real-time scheduling class alone does not create a complete real-time guarantee.
-
-## Inspecting scheduling behavior
-
-Linux exposes scheduling information through process tools and performance counters.
-
-Useful commands include:
+Linux lets you see scheduling through ordinary tools.
 
 ```bash
 ps -eLo pid,tid,psr,stat,pri,ni,pcpu,comm
@@ -314,152 +214,102 @@ taskset -pc 2450
 perf stat -e context-switches,cpu-migrations ./program
 ```
 
-These commands can show:
+These show the process and thread identifiers, which CPU a thread last ran on, its state, priority and nice value, and how often it switched or moved. A large count of switches or migrations alone does not say why. Combined with CPU usage, lock wait time, and latency, it points to whether many threads are runnable and competing or many are waiting and waking often.
 
-- Process and thread IDs
-- The CPU currently running a thread
-- Process state
-- Priority and nice value
-- CPU utilization
-- Voluntary and involuntary context switches
-- CPU migrations
+For example, a service that was changed from 16 workers to 256 workers used more CPU, but throughput hardly changed and tail latency got worse. Measuring switches, migrations, and lock waits showed the workers were mostly doing computation and fighting over the same cache lock. Fewer workers with less sharing improved latency, even though the number of threads went down.
 
-The exact output depends on the system and permissions. A number is useful only when compared with a workload, baseline, and latency result.
+## How experienced engineers think about it
 
-For example, high context-switch counts may indicate many runnable threads, frequent blocking, lock contention, or a design that wakes more work than necessary. The count alone does not identify which cause applies.
+They first ask what the thread is doing. Is it actually running, is it ready but waiting for a CPU, is it sleeping for disk or a lock, is it stopped, or is it waking and sleeping repeatedly. Then they compare that with what the user sees. Is CPU usage high, is the run queue long, are there many switches, are migrations high, how long do locks wait, how long does disk or network wait, and what happens to tail latency and throughput.
 
-## A realistic production example
-
-Imagine a service that becomes slower after the team increases its worker pool from 16 to 256 threads. CPU utilization increases, but throughput barely improves and p99 latency becomes much worse.
-
-The team measures context switches, CPU migrations, lock wait time, and database connection wait time. The workers are mostly CPU-bound during request parsing and also compete for a shared cache lock. The larger pool creates more runnable work than the machine can execute, increases switching, and increases lock contention.
-
-The team reduces the worker count, partitions the cache to reduce sharing, and measures again. Throughput improves slightly and tail latency falls significantly.
-
-The lesson is not that 256 threads is always wrong. It is that concurrency must match CPU capacity, blocking behavior, shared-state design, and dependency limits. More runnable work is not the same as more useful work.
-
-## How experienced engineers reason about scheduling problems
-
-They first distinguish the state of the work:
-
-- Is it running on a CPU?
-- Is it runnable but waiting for a CPU?
-- Is it sleeping on I/O, a lock, or a timer?
-- Is it stopped by a signal or debugger?
-- Is it repeatedly waking and blocking?
-
-Then they compare scheduling evidence with the user-visible result:
-
-- CPU utilization
-- Run-queue length
-- Context switches
-- CPU migrations
-- Thread count
-- Lock wait time
-- I/O wait time
-- Tail latency
-- Throughput
-
-They avoid pinning CPUs or changing priorities just because those actions sound low-level. The change should address a measured problem and include a way to verify that it did not create starvation or overload elsewhere.
+They do not pin CPUs or raise priorities just because those knobs exist. A change is made to fix a specific observation, and afterward they check that it did not starve another part of the system.
 
 ## Interview definitions
 
 ### What is CPU scheduling?
 
-> CPU scheduling is the operating system's process of choosing which runnable thread should execute on each CPU and when another thread should receive a turn.
+> CPU scheduling is how the kernel chooses which runnable thread should run on each CPU and when to give the CPU to another thread.
 
 ### What is a runnable thread?
 
-> A runnable thread is ready to execute but is waiting for a CPU or scheduling opportunity.
+> A runnable thread is ready to run but is waiting for a CPU. It is different from a sleeping thread, which is waiting for a disk operation, a lock, or a timer and should not be given a CPU until that thing is ready.
 
 ### What is preemptive scheduling?
 
-> Preemptive scheduling allows the operating system to interrupt a running thread and schedule another one without waiting for the first thread to voluntarily yield.
+> Preemptive scheduling means the kernel can interrupt a running thread and run another thread, without waiting for the first thread to say it is willing to give up the CPU.
 
 ### What is a context switch?
 
-> A context switch is the process of saving one thread's execution state and restoring another thread's state so the CPU can resume different work.
+> A context switch is when the kernel saves the execution state of one thread and restores the state of another so the CPU can continue different work.
 
-### What is a voluntary context switch?
+### What is a switch because the thread waited versus a switch because it was interrupted?
 
-> A voluntary context switch occurs when a thread gives up the CPU because it blocks, waits, or explicitly yields.
-
-### What is an involuntary context switch?
-
-> An involuntary context switch occurs when the scheduler interrupts a running thread to schedule other work.
+> In one case the running thread asked to wait, for example for disk or a lock, so the kernel runs another thread while it waits. In the other case the running thread could continue, but the kernel interrupted it because another thread had been waiting or had higher priority.
 
 ### What is CPU affinity?
 
-> CPU affinity restricts a process or thread to a selected set of CPUs, sometimes to improve locality, isolation, or timing predictability.
+> CPU affinity restricts a program to a set of CPUs. It can help keep data close to the cache or near a device, but it can also make balance worse if the chosen CPU becomes busy.
 
 ## Interview follow-up questions
 
-### What is the difference between a process and a thread from the scheduler's perspective?
+### What is the difference between a process and a thread for the scheduler?
 
-> Linux schedules threads. Threads in one process share an address space and many resources, while threads in different processes have separate address spaces and stronger isolation.
+> The kernel schedules threads. Threads in one process share the same address space, while threads in different processes have separate spaces.
 
 ### Why does a context switch have a cost?
 
-> The kernel must save and restore execution state, and the new thread may lose useful CPU-cache and translation-cache locality. Scheduling and CPU migration can add more overhead.
+> The kernel must save and restore registers, and the new thread may have lost the data that was warm in the caches. It may need to fetch instructions and data again, and the kernel also does scheduling work.
 
-### Why can too many threads reduce performance?
+### Why can more threads make a program slower?
 
-> They consume memory and scheduling state, compete for CPUs and shared locks, increase context switches, and may overload downstream resources. More concurrency helps only while the system has useful independent capacity.
+> Many runnable threads compete for the same CPUs and the same locks, and they cause more switches and more cache misses. More concurrency only helps while there is useful independent work and a resource to run it.
 
-### What is the difference between a runnable and a sleeping thread?
+### What is the difference between runnable and sleeping?
 
-> A runnable thread is ready but waiting for CPU time. A sleeping thread is waiting for another event such as I/O, a lock, or a timer and should not consume CPU while waiting.
+> Runnable means ready and waiting for a CPU. Sleeping means waiting for something else, like disk or a lock, and not needing a CPU until that thing is ready.
 
-### When might CPU pinning help?
+### When can pinning help?
 
-> Pinning can help with latency isolation, cache locality, device affinity, or specialized real-time work. It can hurt when it prevents load balancing or pins work to an overloaded or distant NUMA node, so it should be measured.
+> Pinning can help when you want to keep a latency-sensitive thread near its data or near a device queue, or when you have a specific real-time need. It can hurt when it stops the scheduler from balancing load or keeps work on a CPU whose memory is far away on a NUMA machine.
 
 ### What is starvation?
 
-> Starvation occurs when a runnable task waits for an unacceptably long time because other work continually receives scheduling preference.
+> Starvation is when a runnable thread waits for a very long time because other threads with higher priority or better sharing always get chosen first.
 
-### Is high context-switch activity always bad?
+### Is many context switches always bad?
 
-> No. Context switches are necessary when work blocks or multiple tasks share a CPU. It becomes a problem when switching, migrations, or wakeups consume significant capacity or contribute to poor latency.
+> No. Switches are needed when threads wait for disk or when many threads share a CPU. It becomes a problem when switching and waking use a noticeable amount of CPU or when they contribute to higher latency.
 
 ## Common misconceptions
 
 ### “The scheduler runs processes, not threads.”
 
-Processes provide isolation and resources, but Linux schedules individual threads.
+The scheduler runs individual threads. A process is the container with address space and resources, but the schedulable unit is the thread.
 
-### “A context switch copies the whole process memory.”
+### “A context switch copies all memory.”
 
-The kernel saves and restores execution state. It does not copy the entire address space for every switch, although changing address spaces can affect memory-translation state and locality.
+It saves and restores registers and execution state. It does not copy the whole address space, although changing address spaces can make the next accesses miss in the translation cache.
 
-### “More CPU cores always solve scheduling problems.”
+### “More cores always fix scheduling.”
 
-More cores can provide capacity, but locks, memory bandwidth, I/O, dependencies, and serial portions of the workload may remain bottlenecks.
+More cores help when CPU is the bottleneck, but locks, memory bandwidth, disk, and serial parts of the workload can still be the limit.
 
-### “A sleeping process is wasting CPU.”
+### “A sleeping thread wastes CPU.”
 
-A sleeping thread is usually waiting for an event and is not consuming CPU while it sleeps. A busy loop is the pattern that wastes CPU when no work is available.
+A sleeping thread is waiting and does not use a CPU. A loop that keeps checking again without waiting is the pattern that wastes CPU.
 
-### “CPU affinity always improves performance.”
+### “Pinning always makes things faster.”
 
-Affinity can improve locality or isolation, but it can also create imbalance and prevent the scheduler from moving work to an available CPU.
+It can keep data close, but it can also keep work on a busy or distant CPU and prevent the scheduler from balancing a burst.
 
 ### “Real-time priority guarantees real-time behavior.”
 
-Real-time scheduling helps prioritize work, but deadlines also depend on memory, interrupts, locks, devices, page faults, and the rest of the system design.
+Priority helps choose who runs, but deadlines also depend on interrupts, memory, locks, and devices, not just the scheduling class.
 
 ## Summary
 
-Linux schedules threads, not abstract programs. Threads move between running, runnable, sleeping, stopped, and exited states as they use the CPU, wait for events, and complete work.
-
-Preemptive scheduling protects fairness and responsiveness, but it adds context-switch and locality costs. A context switch saves and restores execution state; it may also disturb caches, translation state, and CPU affinity. Too many runnable threads can increase overhead and contention without increasing useful throughput.
-
-Scheduling problems should be investigated with evidence: thread states, CPU utilization, run-queue behavior, context switches, migrations, lock waits, I/O waits, latency, and throughput. Affinity, priority changes, and larger thread pools are tools for specific measured problems, not universal performance fixes.
+The kernel schedules threads, not processes. A thread can be running, runnable and waiting for a CPU, or sleeping and waiting for something else. Preemptive scheduling lets the kernel interrupt a running thread so others get a turn. A context switch saves and restores state, and it often loses some cache warmth. Many runnable threads cause more switches and more competition for locks without adding useful throughput. The right way to diagnose is to look at thread states, CPU usage, queue length, switching, lock waits, and latency together, and to change affinity or priority only to fix a specific observation.
 
 ## If you want to build this later
 
-Build a small scheduling experiment that starts configurable numbers of CPU-bound and sleeping threads.
-
-Measure elapsed time, throughput, CPU usage, context switches, and migrations as you change the number of threads. Add a lock shared by all workers, then partition the work so that threads use less shared state. Compare normal scheduling with a controlled CPU-affinity experiment.
-
-The goal is to observe the difference between running, runnable, and sleeping work, and to see when more concurrency changes from useful parallelism into scheduling and contention overhead.
+Write a small program that can start a chosen number of threads that either do computation or mostly sleep. Measure how long it takes, how much CPU it uses, and how often it switches and migrates. Start with a number close to the number of CPUs and then increase it. Add a shared lock that all workers use, then change the program so each worker touches less shared data. Compare the default scheduler with a run where you pin threads to CPUs. The goal is to see the difference between running, runnable, and sleeping, and to see when adding concurrency turns into overhead.

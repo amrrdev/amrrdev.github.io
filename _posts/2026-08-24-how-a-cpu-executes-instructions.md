@@ -3,7 +3,7 @@ mermaid: true
 title: "How a CPU Executes Instructions"
 date: 2026-08-24
 categories: ["System Engineering"]
-tags: [Machine instructions, Instruction pointers, Registers]
+tags: [cpu, instructions, registers, pipeline, out-of-order]
 series: "System Engineering"
 stage: "Stage 3 — Hardware and Computer Architecture"
 stage_order: 3
@@ -367,13 +367,13 @@ Systems engineers use all three because each view hides something important.
 
 **“A memory access has one predictable cost.”** The cost depends on where the data is found, whether the access is dependent on earlier work, whether other cores are modifying it, and whether the access causes translation or cache misses.
 
-## What to remember
+## Summary
 
 The CPU executes an architectural instruction stream, but it does so using a much more complicated internal machine. It fetches ahead, predicts control flow, decodes several instructions, tracks dependencies, executes ready work, and retires results in order.
 
-The key performance question is whether the processor has useful independent work available. A program slows down when instructions depend on a long chain, wait for memory, compete for an execution resource, or repeatedly mispredict control flow. The only reliable way to understand a real case is to connect source code, generated instructions, and measurements.
+The key question is whether the processor has useful independent work available. A program slows down when instructions depend on a long chain, wait for memory, compete for an execution resource, or repeatedly mispredict control flow. The only reliable way to understand a real case is to connect the source code, the generated instructions, and measurements.
 
-## Optional project for your next break
+## If you want to build this later
 
 Build a small **CPU behavior laboratory** in C. Include benchmarks for a dependency chain, several independent accumulators, predictable branches, unpredictable branches, and sequential versus scattered array access. Add a command-line option for the input size.
 

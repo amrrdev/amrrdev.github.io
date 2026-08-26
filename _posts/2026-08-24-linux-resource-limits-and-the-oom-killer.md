@@ -3,526 +3,321 @@ mermaid: true
 title: "Linux Resource Limits and the OOM Killer"
 date: 2026-08-24
 categories: ["System Engineering"]
-tags: [File-descriptor, cgroup OOM, Cgroups, ulimit]
+tags: [linux, cgroups, oom-killer, rlimit, resource-limits]
 series: "System Engineering"
 stage: "Stage 2 - Linux and Operating System Internals"
 stage_order: 2
-series_order: 6
+series_order: 8
 ---
 
 > Stage 2 — Linux and Operating System Internals  
 > Subject area 2.2 — Scheduling and Resource Control  
-> Article 2
+> Article 8
 
 ## The short version
 
-Linux resources are finite. A process can run out of file descriptors, threads, address space, CPU time, locked memory, or other resources even when the machine as a whole still appears healthy. A group of processes can also exceed its memory budget and trigger reclaim, throttling, allocation failures, or the out-of-memory killer.
+Every resource on a Linux machine is finite. A program can run out of file descriptors, address space, or threads even when the machine still has free disk and CPU. A group of programs can also use more memory than is available and force the kernel to reclaim or, as a last resort, to end a process.
 
-Resource limits exist to contain consumption and protect the system from one process or service taking everything. A limit is useful only when the application understands what failure looks like and the operator can observe usage before the boundary is reached.
+Limits exist to keep one program from taking everything. A limit is useful only when you understand what happens at the boundary and can see you are approaching it. The out-of-memory killer, often called the OOM killer, is that last resort. When the kernel cannot reclaim enough memory to satisfy an important allocation, it chooses a process to end so the rest of the system can continue. It is not a way to manage memory. It is a way to keep the machine alive when management has already failed.
 
-The out-of-memory killer, usually called the OOM killer, is a last-resort mechanism. When Linux cannot reclaim enough memory to satisfy an important allocation, it selects a process or memory-control group to terminate so that the rest of the system can continue. It is not a memory-management strategy and it is not a substitute for setting reasonable limits.
-
-The central question is:
-
-> How does Linux contain resource usage, and what happens when a process or service reaches its limits?
+The question this article answers is how Linux contains usage and what happens when a program or a group reaches its boundary.
 
 ## Where this article fits
 
-The previous article explained how Linux schedules threads and shares CPU time. This article explains the limits that constrain processes and the memory-pressure behavior that appears when capacity is exhausted.
+The previous article explained how the kernel shares CPU time between threads. This article explains the boundaries that keep those threads and the services they form from using more than they should.
 
-Later articles will explain virtual memory, page faults, allocators, containers, cgroups, storage, and production capacity planning in more depth. This article gives us the practical limit-and-failure model that connects those topics.
+You will need this before virtual memory and containers, because those topics build on the same ideas of accounting and reclaim. The earlier resource ownership article described why bounds matter for correctness, not just operations. Here you see how the kernel enforces them.
 
-## Why limits are necessary
+## Why limits are needed
 
-Without limits, one program could create processes until the system could not schedule useful work, open files until other operations failed, allocate memory until the machine became unstable, or create connections until a shared dependency collapsed.
+Without limits, one program could create processes until the table is full, open files until no one else can open one, or allocate memory until the machine becomes unstable.
 
-Limits serve two purposes:
-
-1. They prevent uncontrolled usage from spreading through the system.
-2. They create a defined point where the program must handle exhaustion.
-
-The second purpose is easy to miss. A limit does not remove failure. It moves failure to a known boundary where the system can reject work, shed load, restart a component, or alert an operator.
+Limits do two things. They stop usage from spreading and breaking the whole machine, and they create a point where the program must decide what to do when it cannot get more. That second point is easy to miss. A limit does not remove failure. It moves failure to a place where the program can reject work, wait with a timeout, or tell an operator.
 
 ```mermaid
 flowchart LR
-    Work[New work] --> Resource[Resource usage]
-    Resource --> Check{Limit reached?}
-    Check -->|No| Continue[Continue normally]
-    Check -->|Yes| Policy[Failure or overload policy]
-    Policy --> Reject[Reject operation]
-    Policy --> Wait[Wait with a deadline]
-    Policy --> Reclaim[Reclaim or release resources]
-    Policy --> Kill[Terminate a task as last resort]
+    Work[New work] --> Use[Uses a resource]
+    Use --> Check{At limit?}
+    Check -->|no| Continue[Continue]
+    Check -->|yes| Policy[Choose a policy]
+    Policy --> Reject[Reject]
+    Policy --> Wait[Wait with deadline]
+    Policy --> Reclaim[Free something]
+    Policy --> Kill[End a task as last resort]
 ```
 
-A good system knows which policy applies to each resource. Running out of a file descriptor should not be handled like running out of memory. A full worker queue should not be handled like a crashed process.
+What to do at the limit depends on the resource. Running out of a file descriptor is not handled like running out of memory, and a full queue is not handled like a crashed process.
 
-## Per-process limits: `RLIMIT`
+## Limits for one process
 
-Linux provides per-process resource limits through the `getrlimit`, `setrlimit`, and `prlimit` interfaces. A process has a soft limit and a hard limit for many resources.
-
-The soft limit is the value currently enforced for the process. The hard limit is the maximum value to which an unprivileged process can raise its soft limit. Increasing a hard limit generally requires appropriate privileges.
+Linux keeps a set of limits for each process that can be read with `getrlimit` and changed with `setrlimit`. A shell shows them with `ulimit -a`. Each limit has two numbers. The soft limit is what is enforced now. The hard limit is the largest value an ordinary program can raise the soft limit to. Raising the hard limit needs permission.
 
 ```text
-Hard limit
-    └── Maximum allowed soft limit
-          └── Current enforced soft limit
+hard limit is the ceiling
+    soft limit is what is enforced now, and can be raised up to the ceiling
 ```
 
-A shell often exposes these limits through `ulimit`:
+A limit set in one shell affects programs started from that shell, but a service started by `systemd` or a container runtime may have different limits set by that manager.
 
-```bash
-ulimit -a
-ulimit -n
-```
+### File descriptors
 
-The exact output depends on the shell and environment. A limit set in one shell affects processes started from that shell, but a service manager, container runtime, or login system may configure different limits for a service.
+One limit controls how many file descriptors a process may have open. Descriptors are used for files, sockets, pipes, and many other kernel objects. When the limit is reached, calls like `open` or `socket` fail and a program that prints `too many open files` is telling you exactly that, even though disk and memory may still look fine. The cause can be legitimate concurrency, a limit that is too low, or a leak where the program opened descriptors and forgot to close them.
 
-## Important per-process limits
+### Count of processes and threads
 
-Linux supports many resource-limit categories. The most useful ones to understand first are these.
+One limit controls how many processes or threads a user may have. When it is reached, creating a new thread or process fails with `EAGAIN`. This is a per-user limit, not a per-service limit. A user that runs several services can hit the total even when each service looks small.
 
-### `RLIMIT_NOFILE`
+### Address space
 
-This limits the number of file descriptors a process may have open. File descriptors refer to files, sockets, pipes, devices, event objects, and other kernel-managed resources.
+One limit controls how large the virtual address space of a process may grow. This is not the amount of resident memory currently in RAM. A program can map a large address range while only a part of it is in RAM. Reaching this limit makes new mappings fail even when the machine still has free RAM.
 
-When the limit is reached, operations such as `open`, `socket`, or `accept` can fail. A service may report “too many open files” even when the disk, memory, and CPU are otherwise healthy.
+### CPU time, stack, and locked memory
 
-The cause may be legitimate concurrency, an undersized limit, or a descriptor leak. Raising the limit without finding the cause can hide the leak and allow the process to hold more resources than the system can safely support.
+Other limits control how much CPU time a process may consume, how large its stack may grow, and how much memory an ordinary program may lock so it cannot be swapped. Locked memory is used by some real-time and security-sensitive programs, but allowing it without bound could starve the rest of the machine. The details of each limit, including its unit and when it is checked, are in the manual, and similar names do not mean the same behavior.
 
-### `RLIMIT_NPROC`
+## A limit is not usage
 
-On Linux, this limit controls the number of processes, or more precisely threads, associated with a real user ID. Reaching it can cause process or thread creation to fail with `EAGAIN`.
+A limit says how much a program may use. It does not say how much it uses now. To debug you compare the two.
 
-This is different from a per-service process limit or a container cgroup limit. A user can have several services, and their combined process or thread usage may reach the user-level boundary.
-
-### `RLIMIT_AS`
-
-This limits the total address space of a process. It is not the same as the amount of physical RAM currently resident. A process can have a large virtual address space with only part of it backed by physical memory.
-
-An address-space limit can cause memory mappings or allocations to fail even when the system has available physical memory.
-
-### `RLIMIT_CPU`
-
-This limits the amount of CPU time consumed by a process. It measures CPU time, not wall-clock time. A process that sleeps for an hour may consume very little CPU time, while a busy loop may reach the limit quickly.
-
-### `RLIMIT_STACK`
-
-This limits the stack size for the process's main thread or, depending on the design, affects how stack resources are configured. A stack limit that is too small can cause deep recursion, large local allocations, or thread startup to fail.
-
-### `RLIMIT_MEMLOCK`
-
-This limits how much memory an unprivileged process may lock into RAM so that it cannot be swapped out. Locked memory is used by some real-time, security, and high-performance applications, but allowing unlimited locked memory could starve the rest of the system.
-
-The important practice is to read the documentation for the specific limit. Similar names do not imply identical units, enforcement points, or failure results.
-
-## Limits are not the same as usage
-
-A configured limit tells you what the process may consume. It does not tell you how much it is using now.
-
-For example:
-
-- `RLIMIT_NOFILE` is a descriptor ceiling; `/proc/<pid>/fd` shows current descriptor entries.
-- `RLIMIT_AS` is an address-space limit; `/proc/<pid>/maps` shows mappings, while resident memory needs different measurements.
-- `RLIMIT_CPU` is a CPU-time ceiling; process statistics show usage so far.
-- A memory cgroup's `memory.max` is a group limit; `memory.current` shows current accounted usage.
-
-Diagnosis requires comparing current usage, limit, rate of change, and the operation that failed.
+For example, the descriptor limit is the ceiling while `/proc/<pid>/fd` shows the current entries. The address space limit is the ceiling while `/proc/<pid>/maps` shows the current mappings and different files show resident usage. The CPU time limit is the ceiling while process accounting shows what has been used so far. For a group, the file `memory.max` is the ceiling and `memory.current` is what is used now. You need the current value, the ceiling, how fast the current value is changing, and which call failed.
 
 ## What happens when a per-process limit is reached
 
-The kernel usually rejects the operation that would exceed the limit. The exact error depends on the resource and system call.
+The kernel usually just rejects the call that would cross the limit and returns an error that matches the resource.
 
 ```mermaid
 sequenceDiagram
-    participant App as Process
+    participant App as Program
     participant Kernel
     participant Resource
-
-    App->>Kernel: Request resource
-    Kernel->>Kernel: Check process limit
-    alt Capacity available
-        Kernel->>Resource: Allocate or open
-        Resource-->>Kernel: Resource handle
-        Kernel-->>App: Success
-    else Limit reached
-        Kernel-->>App: Error such as EMFILE or EAGAIN
+    App->>Kernel: ask for resource
+    Kernel->>Kernel: check limit for that process
+    alt still below limit
+        Kernel->>Resource: allocate or open
+        Resource-->>Kernel: handle
+        Kernel-->>App: success
+    else at limit
+        Kernel-->>App: error like EMFILE or EAGAIN
     end
 ```
 
-The process must handle the error. The kernel cannot know whether the application should retry, release an old resource, reject the request, or terminate.
+The program must handle that error. The kernel cannot know whether it should try again, close an old resource, reject a request, or exit. If `accept` fails because descriptors are exhausted, trying again immediately will fail again. The program may need to close idle descriptors, reject new connections, or alert an operator.
 
-For example, if a connection accept fails because file descriptors are exhausted, retrying immediately will not help. The service may need to close leaked or idle descriptors, reject new clients, reduce concurrency, or alert an operator.
+## When a limit is for many programs
 
-## Resource limits and service boundaries
-
-A process limit applies to one process. A service often consists of many processes or containers, so a service-level limit must account for all of them.
-
-Suppose a database allows 200 connections. A service runs 20 replicas, and each replica can open 20 connections. The theoretical maximum is 400 connections, even though every individual process stays within its local configuration.
+A single process limit is not enough when a service is many processes. A database that allows 200 connections can be exceeded by twenty service replicas that each open 20 connections, even though each process stays below its own setting.
 
 ```text
-Per-process connection limit
-    × number of replicas
-    = possible shared-resource demand
+connections per process × number of processes = total demand on the shared resource
 ```
 
-The same reasoning applies to memory, threads, file descriptors, temporary files, and network ports. A local limit does not automatically protect a shared global resource.
+The same is true for memory, threads, and temporary files. A local limit does not protect a shared resource unless you add them up at the level of the shared resource.
 
-## Cgroups: controlling a group of processes
+## Groups of processes with control groups
 
-A control group, commonly called a cgroup, is a Linux mechanism for organizing processes and controlling or accounting for their resource usage. A cgroup can contain a service and its child processes, a container, a user workload, or another operational group.
+A control group, usually called a cgroup, is the kernel's way to track a group of processes together. A cgroup can hold a single service and all its children, a container, or any other set of programs that you want to account for together.
 
 ```mermaid
 flowchart TD
-    Machine[Host machine] --> Root[Root cgroup]
-    Root --> ServiceA[Service A cgroup]
-    Root --> ServiceB[Service B cgroup]
-    ServiceA --> A1[Worker process]
-    ServiceA --> A2[Helper process]
-    ServiceB --> B1[Service process]
-    ServiceB --> B2[Worker process]
+    Machine[Machine] --> Root[Root group]
+    Root --> A[Service A group]
+    Root --> B[Service B group]
+    A --> A1[Worker]
+    A --> A2[Helper]
+    B --> B1[Worker]
 ```
 
-Cgroups can manage or account for resources such as:
+Cgroups can account for and control CPU time, memory usage, number of processes, disk I/O, and which devices can be accessed. They are important for containers because a service is rarely one process. If you only track the parent, you miss the workers it started.
 
-- CPU usage
-- Memory usage
-- Number of processes
-- Block-I/O activity
-- Device access
-- CPU sets and affinity
+## Memory controls for a group on modern Linux
 
-They are important in containers and service managers because a workload is usually more than one process. If a service starts workers, subprocesses, or helper programs, grouping only the parent PID does not necessarily contain all of the service's resource usage.
+Current systems usually use cgroup v2, which has one hierarchy and a set of memory files per group. The exact files depend on the kernel, but a few ideas matter most.
 
-## Cgroup v2 memory controls
+`memory.current` shows how much memory the group and its children use right now. It is useful, but it does not tell you how much reclaim work is happening.
 
-Modern Linux systems commonly use cgroup v2, which provides a unified hierarchy and memory-control files for each cgroup. The exact available files depend on the kernel and configuration, but several concepts are especially important.
+`memory.peak` remembers the largest value `memory.current` has had since the group was created or reset. It matters because a measurement taken after a burst can look calm even though the group was close to its limit a moment ago.
 
-### `memory.current`
+`memory.high` is a point where the kernel starts to throttle the group. When the group goes above it, its programs are put under heavy reclaim and may slow down while the kernel tries to bring usage down. Crossing it does not by itself end a process. It is an early pressure signal that can give an external manager time to react.
 
-This reports the memory currently used by a cgroup and its descendants according to the memory controller's accounting.
+`memory.max` is the hard ceiling. If the group reaches it and the kernel cannot reclaim enough, the group is out of memory and the OOM killer may end one of its tasks.
 
-It is useful for observing current usage, but it is not a complete explanation of memory pressure. A workload may use memory as a cache and still operate well, or use less memory but suffer from high reclaim and page-fault costs.
+`memory.events` is a set of counters that records how often the group was throttled, hit its high or max, or had an OOM kill. Watching these counters tells you whether the group was merely under pressure or actually lost a process.
 
-### `memory.peak`
+`memory.oom.group` changes what happens on OOM. When it is enabled, the whole group is treated as one job and all its tasks may be ended together. That is right for a stateless set of workers that should be restarted together, and wrong for a group that holds unrelated programs.
 
-This records the highest usage observed for the cgroup since creation or reset. Peak usage is valuable because a current measurement taken after a burst may look healthy even though the workload previously approached its limit.
+## What happens before the killer runs
 
-### `memory.high`
-
-`memory.high` is a throttling boundary. When a cgroup exceeds it, processes are put under heavy reclaim pressure and may be slowed while the kernel tries to reduce usage. Crossing it does not directly invoke the OOM killer.
-
-This makes `memory.high` useful as an early-pressure mechanism. It can expose a workload to gradual slowdown and give an external manager time to respond.
-
-### `memory.max`
-
-`memory.max` is the hard memory limit for the cgroup. If usage reaches the limit and reclaim cannot reduce it, the cgroup can enter an out-of-memory condition and the OOM killer may terminate tasks within that cgroup.
-
-The limit is a final safety boundary. It should not be the only memory-management strategy because reaching it means the workload is already failing to satisfy its demand.
-
-### `memory.events`
-
-`memory.events` reports memory-pressure and limit events, including activity around the high and max boundaries, OOM conditions, and OOM kills. These counters are useful for alerting and post-incident analysis.
-
-An operator should distinguish “the cgroup was throttled under high pressure” from “the cgroup killed a task because it reached the hard limit.” They imply different urgency and recovery behavior.
-
-### `memory.oom.group`
-
-When enabled, `memory.oom.group` tells the OOM killer to treat the cgroup as an indivisible workload. If the group OOMs, all tasks in the cgroup or relevant descendants can be killed together rather than leaving a partially alive service with an incomplete set of workers.
-
-Whether group killing is appropriate depends on the workload. A stateless worker group may be safe to restart together. A group containing unrelated processes may need more selective behavior.
-
-## Memory pressure before OOM
-
-Out-of-memory killing is not the first thing Linux does when memory becomes scarce. The kernel tries to reclaim memory first.
-
-Reclaim may remove clean page-cache pages, write dirty pages back to storage, swap anonymous pages if configured, or shrink reclaimable kernel caches. Reclaim itself consumes CPU and can delay application work.
+The kernel does not immediately end a process when memory gets scarce. It first tries to reclaim memory. It can drop clean pages from the file cache, write dirty pages back to disk, swap anonymous pages if swapping is allowed, and shrink kernel caches. Reclaim takes CPU and can make programs slower.
 
 ```mermaid
 flowchart TD
-    Demand[New memory demand] --> Available{Free or reclaimable memory?}
-    Available -->|Yes| Allocate[Complete allocation]
-    Available -->|No| Reclaim[Reclaim cache, pages, or swap]
-    Reclaim --> Success{Enough memory recovered?}
-    Success -->|Yes| Allocate
-    Success -->|No| OOM[Invoke OOM decision]
+    Need[Need more memory] --> Free{Is there free or reclaimable memory?}
+    Free -->|yes| Done[Allocate]
+    Free -->|no| TryReclaim[Reclaim caches, write back, swap]
+    TryReclaim --> Enough{Did reclaim free enough?}
+    Enough -->|yes| Done
+    Enough -->|no| OOM[Choose a task to end]
 ```
 
-A system can therefore be severely degraded before the OOM killer runs. High reclaim activity, swapping, page faults, and allocation stalls can produce high latency and low throughput even when no process has been killed yet.
+A machine can be very slow before any process is ended, because it spends its time reclaiming and paging while throughput falls.
 
-## The system-wide OOM condition
+## Two different out-of-memory situations
 
-The system-wide OOM killer is invoked when the kernel cannot reclaim enough memory to satisfy an important allocation and the normal recovery paths are not sufficient.
-
-The kernel selects a task to sacrifice in an attempt to free enough memory for the system to continue. It uses heuristics based on memory usage and process properties. The selection is not simply “kill the process with the largest RSS,” and administrators can influence the relative score with `oom_score_adj`.
-
-The selected task may not be the one that caused the underlying memory growth. The task that happens to request memory when the system reaches the crisis may be different from the process that gradually consumed most of the memory.
-
-This is why an OOM log must be investigated as an event in a memory-pressure story, not treated as proof that the killed process was the original bug.
-
-## The OOM score and `oom_score_adj`
-
-Linux exposes an OOM-related score through `/proc/<pid>/oom_score` and an adjustment through `/proc/<pid>/oom_score_adj`.
-
-The adjustment lets a privileged operator make a process more or less likely to be selected. A value of `-1000` provides complete OOM protection for the task, while positive values make it more eligible.
-
-Protecting a process is dangerous if the process is not genuinely essential. If every service is protected, the kernel loses useful victims and the system may remain under pressure longer or take a more severe action.
-
-The adjustment should be used as part of an intentional service policy, not as a way to hide memory leaks.
-
-## Memcg OOM versus system OOM
-
-A cgroup can hit its `memory.max` even when the host still has free memory. In that case, the OOM decision is constrained to the memory cgroup rather than selecting an unrelated process elsewhere on the machine.
-
-The distinction matters operationally:
+The kernel can run out of memory for the whole machine or for one group that hit its `memory.max` while the machine still has free memory. In the first case it may choose a task anywhere on the machine. In the second case it is limited to the group that hit its ceiling.
 
 ```text
-System-wide memory pressure
-    → OOM decision may affect a task across the host
-
-Cgroup memory.max pressure
-    → OOM decision is contained within the cgroup
+Whole machine out of memory → may end a task anywhere
+One group at memory.max → ends a task inside that group
 ```
 
-A container being killed for exceeding its memory limit does not necessarily mean the host ran out of memory. Conversely, a host-level OOM can affect workloads that are individually below their configured limits if the overall host has insufficient reclaimable memory.
+This distinction matters. A container that is killed for exceeding its limit does not mean the host is out of memory. A host that is out of memory can affect programs that were individually below their limits.
 
-## What an OOM kill looks like
+## What the choice of victim looks like
 
-The killed process may receive `SIGKILL`, so it cannot run cleanup code. The process's local memory and file descriptors will eventually be reclaimed by the kernel, but application-level external effects may remain.
+When the OOM killer is needed, the kernel picks a task to sacrifice. It does not always pick the program that uses the most memory, and a privileged operator can make a program more or less likely to be chosen by writing to `/proc/<pid>/oom_score_adj`. A value of `-1000` protects a task completely, but protecting everything leaves the kernel with no useful choice and the machine may stay under pressure.
 
-Observable signs can include:
+The task that triggered the final allocation is not necessarily the program that slowly grew over time. The program that happened to ask for memory at the moment the system ran out is the one that is seen asking, while the program that grew earlier may be the real cause. A log line that says which task was chosen is evidence, not proof of the root cause.
 
-- Kernel log messages describing an OOM event
-- A process exit caused by signal 9
-- A service manager reporting a killed or failed process
-- Container runtime reporting an OOM kill
-- Increasing memory pressure before the kill
-- Rising reclaim or swap activity
-- `memory.events` counters increasing in a cgroup
-- Restart loops after the victim exits
+## What you see after an OOM kill
 
-The application may not produce a useful final log because `SIGKILL` cannot be handled. Kernel and supervisor logs become especially important.
+The chosen task is usually sent `SIGKILL`, which it cannot handle, so it does not run any cleanup code. The kernel will reclaim its memory and descriptors, but any external effects it already caused, like a message it sent or a file it left half written, remain.
 
-## OOM is not the same as a normal allocation failure
+Typical signs are messages about OOM in the kernel log, a process that exited due to signal 9, a service manager that reports the process was killed, a container runtime that reports an OOM kill, rising reclaim and swapping before the kill, counters in `memory.events` increasing, and later a restart loop as the supervisor starts the program again. Because `SIGKILL` cannot be handled, the program itself may not have logged anything useful at the end, so kernel and supervisor logs become important.
 
-An application can receive an allocation failure without the OOM killer terminating a process. A memory allocation can fail because of a process address-space limit, a cgroup limit, an overcommit policy, a mapping restriction, or a temporary inability to satisfy a particular request.
+## An OOM kill is not the same as an allocation failure
 
-Some kernel allocations do not invoke the OOM killer. Some may return an error, retry, or fail for a reason specific to the requested allocation.
+A program can get an allocation failure without any process being ended. A mapping can fail because of a per-process address space limit, a group limit, an overcommit policy, or because the kernel could not satisfy the specific request. Some kernel allocations do not trigger the killer at all and just return an error.
 
-The application must still check allocation results and handle failure. It should not assume that “the kernel will kill something” is a valid error-handling strategy.
+The program should still check every allocation and handle failure. It should not assume that the kernel will end something else and make room.
 
 ## Overcommit and address space
 
-Linux can allow a process to reserve more virtual address space than can immediately be backed by physical memory. This is called memory overcommit.
+Linux can allow a program to reserve more virtual address space than can be backed by RAM right now. This is called overcommit. It is useful because programs often reserve large ranges and touch only a part of them. The risk is that many programs eventually touch their reservations at once and the total demand exceeds what the machine can provide.
 
-Overcommit can be useful because programs often reserve address space without touching every page. The risk is that many processes may eventually touch their promised pages at the same time, creating more demand than the system can satisfy.
+The kernel has a policy that decides when to allow a reservation and how much total reservation is considered commitable. That policy is a system-wide setting, not something a single program controls.
 
-The kernel's overcommit configuration affects when allocations are accepted and how much memory is considered commit-able. The exact policy is system-wide and should be treated as an operational configuration, not an application assumption.
+Trying to reserve address space and actually being able to use the memory are different things. A successful `malloc` does not guarantee that every byte can be touched later without pressure. A program still needs to watch real usage and handle failures.
 
-The distinction is important:
+## Why memory accounting can be confusing
 
-```text
-Virtual address reservation
-    ≠
-Physical memory currently available
-```
+Memory is used for anonymous heap and stack, file mappings, the page cache, shared pages, kernel structures, and socket buffers. The same physical page can be shared by several programs, so adding up each program's virtual or resident size can overstate what is physically used. A group view and a per-process view count sharing differently.
 
-Calling `malloc` successfully does not necessarily mean every byte can be used forever without memory pressure. A program still needs to monitor real usage and handle failures.
+That is why you compare several views together. The per-process resident size, its mappings, its allocation profile, the group's current and peak usage, the page cache, swapping, pressure, and the kernel log together tell the story that one number alone cannot.
 
-## Why memory usage can be confusing
+## An example where the limit hides the real problem
 
-Memory accounting includes several categories:
+A service runs in a container with a 2 GiB limit. Its heap is 1.4 GiB and its in-memory cache grows during a traffic spike. At the same time it uses a few hundred megabytes of page cache and socket buffers. The container hits `memory.max`. The kernel tries to reclaim, but the active anonymous memory that the program actually needs cannot be reclaimed, so a task in the group is ended. Other containers on the same host stay fine because the host still has free memory.
 
-- Anonymous memory used by heaps and stacks
-- File-backed memory mappings
-- Page cache
-- Shared pages
-- Kernel data structures
-- Socket buffers
-- Memory used by child processes
+The first reaction is to raise the limit to 4 GiB. The service survives the next spike, but the usage keeps growing. The real problem was a cache without a bound and without an eviction rule.
 
-The same physical page may be shared by several processes. Adding every process's virtual or resident values can overstate physical consumption. A cgroup or system-level view may account for shared resources differently from a per-process view.
+A lasting fix bounds the cache by size and age, measures heap, cache, page cache, and group usage separately, uses `memory.high` as an early warning where it fits, and alerts on `memory.events`, peak usage, and restart counts. It also keeps headroom for bursts and for two copies of the service running during a deployment. The limit remains useful as a safety net, but it does not fix unbounded growth by itself.
 
-This is why diagnosing memory requires comparing multiple measurements: process RSS, mappings, allocation profiles, cgroup usage, page cache, swap, pressure, and kernel logs.
+## How to look at descriptor exhaustion
 
-## A realistic production example
+When a program reports `too many open files`, a practical sequence is to confirm which process failed, check its soft and hard descriptor limits, count entries under `/proc/<pid>/fd`, sort them into files, sockets, and pipes to see what kind of descriptor is leaking, watch whether the count grows over time and compare that growth with the lifetime of requests or connections, look at error paths where cleanup might be missed, and only then decide whether the limit is too low for the real workload. The key is to tell the difference between a limit that is too low and a leak that the limit exposed.
 
-Imagine a service running inside a container with a 2 GiB memory limit. Its current application heap is 1.4 GiB, and an in-memory cache grows during a traffic burst. At the same time, the process uses several hundred megabytes of page cache and socket buffers.
+## How to look at an OOM
 
-The container reaches `memory.max`. The kernel tries reclaim, but the workload's active anonymous memory cannot be reclaimed enough. A task in the cgroup is killed. The host still has free memory, so other containers remain healthy.
+When a process was ended for memory, a practical sequence is to find whether the host or just one group ran out, check kernel and manager logs, note which task was chosen and what its `oom_score_adj` was, look at current and peak usage before the event, check allocation rate, cache growth, reclaim and swapping, compare the workload with its expected working set and its limit, and see whether another program caused the pressure to grow slowly. The chosen task is a clue, not automatically the cause, and the fix may be to repair a leak, bound a cache, limit concurrency, change placement, or add capacity.
 
-The team initially increases the container limit to 4 GiB. The service survives the next burst, but memory continues to grow. The real problem is an unbounded cache combined with a missing eviction policy.
+## Limits should lead to a policy
 
-The durable fix includes:
+A limit should be paired with a decision about what the program does when it is reached. For memory, that could be rejecting new work before allocating more, dropping cache entries, limiting how many requests run at once, spilling work to disk, turning off an optional feature, or, for a disposable worker, allowing the whole group to be ended together.
 
-1. Bounding the cache by size and entry lifetime.
-2. Measuring heap, cache, page-cache, and cgroup usage separately.
-3. Using `memory.high` as an early pressure signal where appropriate.
-4. Alerting on `memory.events`, peak usage, and restart counts.
-5. Keeping enough headroom for normal bursts and deployment overlap.
-6. Testing behavior when memory becomes unavailable.
+What is appropriate depends on what the program owns. A cache entry can be dropped, a payment cannot. A background job can be delayed, a health check should stay available while optional work is shed. Limits are therefore part of program design, not just kernel configuration.
 
-The memory limit remains useful as containment, but it is not the cure for unbounded growth.
+## How to choose a limit
 
-## Diagnosing “too many open files”
+A good limit starts from how the workload actually behaves and what failure mode is acceptable. It helps to ask what the normal and peak usage are, what burst must be handled, what other work shares the machine, what the working set that must stay resident is, what can be reclaimed or dropped, what work can be rejected or delayed, what should happen at the boundary, how quickly the service can scale or restart, what happens when two copies run during a deployment or when a machine fails, and which signal will show the limit is approaching.
 
-A practical investigation can follow this path:
-
-1. Confirm the error and identify the process.
-2. Check the process's soft and hard `RLIMIT_NOFILE` values.
-3. Count entries under `/proc/<pid>/fd`.
-4. Classify descriptors as files, sockets, pipes, and other objects.
-5. Check whether usage grows over time.
-6. Compare descriptor lifetime with request or connection lifetime.
-7. Inspect error paths that may skip cleanup.
-8. Raise the limit only if legitimate workload capacity requires it.
-
-The key distinction is between “the limit is too low for expected use” and “the process is leaking resources.” Both can produce the same immediate error.
-
-## Diagnosing an OOM event
-
-A practical investigation can follow this path:
-
-1. Identify whether the event was host-wide or cgroup-local.
-2. Check kernel logs and service-manager or container-runtime events.
-3. Identify the killed task and its `oom_score_adj`.
-4. Inspect memory usage and peak usage before the event.
-5. Check allocation rate, cache growth, page faults, reclaim, and swap.
-6. Compare the workload with its configured memory limit and expected working set.
-7. Check whether another process caused the gradual pressure.
-8. Decide whether the fix is a leak correction, cache bound, workload limit, scaling change, or capacity change.
-
-The killed process is evidence, not automatically the root cause.
-
-## Limits and graceful overload
-
-A resource limit should connect to a behavior that protects the rest of the system. For memory, possible behaviors include:
-
-- Rejecting new work before allocating more state
-- Evicting cache entries
-- Limiting concurrent requests
-- Spilling work to durable storage
-- Degrading optional features
-- Restarting a stateless worker
-- Killing an entire disposable workload through a cgroup policy
-
-The best policy depends on what the process owns. A cache can be evicted. A payment operation cannot be silently discarded. A background job may be delayed. A health-check endpoint may need to remain available while optional work is shed.
-
-Limits are therefore part of application design, not only kernel configuration.
-
-## How experienced engineers choose limits
-
-They begin with observed workload and failure requirements.
-
-They ask:
-
-- What is the normal usage and peak usage?
-- What burst must be absorbed?
-- What resources are shared with other workloads?
-- What is the safe working set?
-- What can be reclaimed or evicted?
-- What work can be rejected or delayed?
-- What should happen when the limit is reached?
-- How quickly can the service scale or restart?
-- What happens during deployment overlap or node failure?
-- Which signals show that the limit is being approached?
-
-They avoid choosing a limit only from a single successful test. A limit must account for concurrency, data size, traffic shape, background work, fragmentation, runtime behavior, and recovery.
+A limit chosen from one successful test is rarely enough, because concurrency, data size, traffic shape, background work, and allocator behavior all affect what will be needed in production.
 
 ## Interview definitions
 
 ### What is a resource limit?
 
-> A resource limit is a boundary on how much CPU, memory, processes, file descriptors, or another finite resource a process or workload may consume.
+> A resource limit is a bound on how much CPU, memory, processes, file descriptors, or another finite resource a program or a group may use.
 
-### What is the difference between a soft and hard limit?
+### What is the difference between a soft and a hard limit?
 
-> A soft limit is the current enforced value, while a hard limit is the maximum value an unprivileged process may raise its soft limit to.
+> The soft limit is what is enforced now. The hard limit is the largest value an ordinary program may raise the soft limit to. Raising the hard limit needs permission.
 
 ### What is `RLIMIT_NOFILE`?
 
-> `RLIMIT_NOFILE` limits how many file descriptors a process can have open, including descriptors for files, sockets, pipes, and other kernel-managed objects.
+> `RLIMIT_NOFILE` bounds how many file descriptors a process may have open, including files, sockets, and pipes.
 
 ### What is a cgroup?
 
-> A cgroup is a Linux mechanism for grouping processes so their resource usage can be accounted for and controlled together.
+> A control group is how Linux tracks a group of programs together so their resource use can be accounted for and limited as one unit.
 
 ### What is the OOM killer?
 
-> The OOM killer is a last-resort kernel mechanism that terminates a selected task when the system or a memory cgroup cannot reclaim enough memory to satisfy an important allocation.
+> The OOM killer is the kernel's last resort when it cannot reclaim enough memory to satisfy an important allocation. It ends a chosen task so the rest of the system can continue.
 
 ### What is `memory.high`?
 
-> `memory.high` is a cgroup v2 memory-pressure boundary that throttles a workload and forces reclaim when it is exceeded, without directly invoking the OOM killer.
+> `memory.high` in cgroup v2 is the point where a group is throttled and put under heavy reclaim but is not yet at the hard ceiling. It is an early pressure signal.
 
 ### What is `memory.max`?
 
-> `memory.max` is the hard cgroup v2 memory limit. If usage cannot be reduced below it, the cgroup can enter OOM and tasks inside it may be killed.
+> `memory.max` in cgroup v2 is the hard ceiling. If the group reaches it and reclaim cannot bring usage down, the group can trigger an OOM kill inside it.
 
 ## Interview follow-up questions
 
-### Why is increasing a resource limit not always the correct fix?
+### Why is raising a limit not always the right fix?
 
-> The limit may be exposing a leak or unbounded workload. Increasing it can delay the failure or move the pressure to a shared downstream resource. I would first identify the current consumer, usage rate, and intended capacity.
+> The limit may be showing a leak or unbounded work. Raising it can just hide the failure or push pressure to a shared resource downstream. I would first look at who uses the resource, how fast it grows, and what the real capacity needs to be.
 
-### What is the difference between a process limit and a cgroup limit?
+### What is the difference between a per-process limit and a cgroup limit?
 
-> A process limit applies to one process, while a cgroup limit applies to a group of processes and their descendants. A service-level limit usually needs a cgroup because the service may contain workers and helpers.
+> A per-process limit applies to one program, while a cgroup limit applies to a group and its children. A service that is many processes needs a group limit to be contained.
 
-### Does the OOM killer always kill the process using the most memory?
+### Does the OOM killer always end the program that uses the most memory?
 
-> No. It uses a selection heuristic influenced by memory usage, process properties, and `oom_score_adj`. The task that triggers the allocation failure may not be the task that caused the gradual memory growth.
+> No. It uses a heuristic that considers usage and how the administrator adjusted `oom_score_adj`. The program that triggered the final allocation may not be the one that slowly grew.
 
-### What is the difference between host OOM and container OOM?
+### What is the difference between a host OOM and a container OOM?
 
-> A container or cgroup can reach its memory limit while the host still has free memory, causing a cgroup-local OOM. A host OOM occurs when the machine as a whole cannot reclaim enough memory and the decision may affect a workload outside the original container.
+> A container can hit its `memory.max` while the host still has free memory and only that container's tasks may be ended. A host-wide OOM happens when the whole machine cannot reclaim enough and may affect work outside the original container.
 
-### What should an application do when allocation fails?
+### What should a program do when an allocation fails?
 
-> It should check the failure, release or reduce optional memory where possible, reject or defer work according to its contract, and report enough context for diagnosis. It should not assume that the kernel will kill another process or that retrying immediately will help.
+> It should check the failure, free or drop what is optional if possible, reject or delay work according to its contract, and record enough context to debug. It should not assume the kernel will end something else or that trying again immediately will help.
 
-### How would you investigate an OOM kill?
+### How would you look into an OOM kill?
 
-> I would check kernel and supervisor logs, determine whether the event was host-wide or cgroup-local, inspect memory and peak usage, examine reclaim and swap behavior, identify the killed task and its score adjustment, and look for the workload that caused usage to grow.
+> I would check kernel and manager logs, see whether it was host-wide or group-local, look at current and peak usage, check reclaim and swapping, note which task was chosen and its adjustment, and look for the workload that made usage grow.
 
 ## Common misconceptions
 
-### “The OOM killer is a memory allocator.”
+### “The OOM killer allocates memory.”
 
-It is a last-resort recovery mechanism. Normal memory management uses allocation, mapping, reclaim, cache eviction, and possibly swap before an OOM decision is needed.
+It does not. It is the recovery step that runs after normal reclaim has failed. Allocation, reclaim, and swapping happen first.
 
-### “An OOM kill proves the killed process had a memory leak.”
+### “The killed program must have had a leak.”
 
-The killed process may have triggered the final allocation failure while another workload caused the gradual pressure. Logs and usage history are needed to identify the cause.
+The chosen task is often the one that happened to ask for memory when the system ran out, while another program slowly grew beforehand. Logs and history are needed to know the cause.
 
-### “A container memory limit protects the entire host.”
+### “A container limit protects the whole host.”
 
-A cgroup limit contains that workload, but the host still needs enough memory for the kernel, other workloads, and system services. A host can OOM even when each individual service appears within its local limit.
+It protects that group, but the host still needs memory for the kernel and other work. The host can run out even when each program stays below its own limit.
 
 ### “More swap always prevents OOM.”
 
-Swap can provide additional backing for some anonymous memory, but it is slower than RAM and cannot solve unbounded allocation or every type of memory pressure. Heavy swap activity can make a system unusable before an OOM kill occurs.
+Swap can hold some anonymous memory, but it is slower than RAM and it cannot fix unbounded growth or every kind of pressure. Heavy swapping can make the machine unusable before any kill happens.
 
-### “`memory.high` and `memory.max` mean the same thing.”
+### “`memory.high` and `memory.max` are the same.”
 
-`memory.high` is primarily a throttling and reclaim-pressure boundary. `memory.max` is the hard limit that can lead to cgroup-local OOM killing when reclaim cannot reduce usage.
+`memory.high` is where the group is throttled and reclaim is forced. `memory.max` is the hard ceiling where tasks inside the group may be ended.
 
 ### “Per-process limits are enough for a service.”
 
-A service often contains many processes or replicas and shares resources with other workloads. Service-level containment usually requires group-level accounting and limits as well as process limits.
+A service is often many programs and replicas that share a resource. Containing it usually needs group accounting as well as per-process limits.
 
 ## Summary
 
-Linux resource limits contain usage and create explicit boundaries around finite capacity. Per-process `RLIMIT` values limit resources such as file descriptors, processes or threads, address space, CPU time, stack, and locked memory. Cgroups apply accounting and control to a group of processes, which is important for services and containers.
-
-Memory pressure normally causes reclaim and may cause throttling before an OOM event. In cgroup v2, `memory.high` is an early pressure boundary, while `memory.max` is the hard limit that can trigger a cgroup-local OOM decision. The system-wide OOM killer is a last resort when the kernel cannot reclaim enough memory to continue safely.
-
-The OOM killer protects the system, but it does not repair the workload. Reliable services use bounded caches and queues, controlled concurrency, graceful overload behavior, appropriate limits, and observability for usage, peaks, pressure, and kill events.
+Limits keep a program from taking more than it should, and they create a clear boundary where the program must decide what to do. Per-process limits like `RLIMIT` bound one program, while control groups bound a set of programs together, which is how services and containers are contained. Under pressure the kernel reclaims first and may throttle a group at `memory.high`. That hard ceiling at `memory.max` or a whole-machine shortage can trigger the OOM killer, which is a last resort that keeps the machine alive but does not fix the workload. Reliable services use bounded caches and queues, limit concurrency, have a clear policy at the boundary, and watch usage, peaks, pressure, and kill counters.
 
 ## If you want to build this later
 
-Build a small resource-limit laboratory on Linux.
-
-Create programs that open files until `RLIMIT_NOFILE` is reached, create threads until a configured limit is reached, and allocate memory inside a controlled cgroup. Record the errors, observe `/proc`, inspect kernel logs, and compare a process-local limit with a cgroup memory limit.
-
-For the memory experiment, use a disposable workload and a conservative limit. Observe `memory.current`, `memory.peak`, and `memory.events`, then make the program release memory or reduce its cache when pressure appears. The goal is to understand containment and failure behavior without treating the OOM killer as a normal control mechanism.
+Make a small laboratory on Linux for limits. Write programs that open files until `RLIMIT_NOFILE` is hit, create threads until a limit is hit, and allocate memory inside a small cgroup. Note the errors you get, look at `/proc`, and compare a per-process limit with a group limit. For the memory experiment, use a disposable workload and a conservative limit, watch `memory.current`, `memory.peak`, and `memory.events`, and make the program drop its cache or reject work when pressure appears. The goal is to see how containment behaves and why the killer is not a normal control mechanism.
