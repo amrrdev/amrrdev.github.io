@@ -1,4 +1,4 @@
----
+﻿---
 mermaid: true
 title: "Linux Signals and Service Supervision"
 date: 2026-08-23
@@ -10,8 +10,8 @@ stage_order: 2
 series_order: 4
 ---
 
-> Stage 2 — Linux and Operating System Internals  
-> Subject area 2.1 — The Operating System Model  
+> Stage 2 :  Linux and Operating System Internals  
+> Subject area 2.1 :  The Operating System Model  
 > Article 4
 
 ## The short version
@@ -42,13 +42,6 @@ A signal is not a reliable message queue. If the same signal is sent twice quick
 
 For each signal, a process has a disposition. It can be the default action, it can be ignored, or it can be a handler function that the kernel will run. A process can also block a signal. A blocked signal does not disappear. It becomes pending and will be delivered when the process unblocks it. This is useful when a short section of code must not be interrupted, for example while updating a global list of children.
 
-```mermaid
-flowchart LR
-    Signal[Signal sent] --> Blocked{Is it blocked?}
-    Blocked -->|yes| Pending[Becomes pending]
-    Blocked -->|no| Deliver[Runs handler or default action]
-    Pending --> Unblock[Unblocked later] --> Deliver
-```
 
 The diagram shows the path, but the explanation after matters more. Blocking does not mean the signal is lost, only delayed. Threads make this more subtle. A signal can be directed to a specific thread, or to the process as a whole. In the second case, the kernel chooses a thread that is allowed to handle it. You should not assume that `SIGTERM` sent to a multi-threaded HTTP server arrives on the thread running your handler.
 
@@ -90,19 +83,6 @@ When a supervisor wants a service to stop, it sends `SIGTERM`. The word asks is 
 
 A graceful shutdown follows a protocol between the manager and the service. The manager sends `SIGTERM` and waits.
 
-```mermaid
-sequenceDiagram
-    participant Manager as Service manager
-    participant Service as Running service
-    participant Clients
-
-    Manager->>Service: SIGTERM
-    Service->>Service: Stop accepting new work
-    Service->>Clients: Finish or cancel in-flight with a deadline
-    Service->>Service: Flush state and close resources
-    Service-->>Manager: Exit 0
-    Manager->>Service: SIGKILL only if deadline expires
-```
 
 For a backend, that means a few concrete steps. Close the listening socket so the load balancer can route new requests elsewhere. That is why a readiness probe should start failing as soon as `SIGTERM` is received. Give in-flight requests a deadline that is shorter than the supervisor's `TimeoutStopSec`, so they have time to finish or cancel. For HTTP handlers that is where `context.WithTimeout` belongs. Tell background workers to stop taking new jobs, flush what must be durable, and close file descriptors. If the service needs more than the time allowed, the manager will send `SIGKILL` and the remaining state will be lost, so each stage should have its own timeout.
 
@@ -120,14 +100,6 @@ Signals are good for small, infrequent notifications. Telling a process to stop 
 
 A process group is a set of processes that the shell manages together. A session is a set of process groups, often associated with a terminal. When you run a pipeline in a shell and press Ctrl-C, the terminal sends `SIGINT` to the foreground process group, not to a single PID.
 
-```mermaid
-flowchart TD
-    Session[Shell session] --> Shell[Shell process group]
-    Session --> Job[Foreground job process group]
-    Job --> A[Command A]
-    Job --> B[Command B]
-    Terminal[Controlling terminal] -->|Ctrl-C| Job
-```
 
 The same idea matters for a supervisor. If a service started several workers and you only send `SIGTERM` to the parent, the workers can keep running and hold the listening port. The supervisor should send the signal to the process group or, more reliably, track the whole control group so it can stop everything that belongs to the service.
 
@@ -181,6 +153,36 @@ The team made shutdown explicit. On `SIGTERM` the service marked itself as not r
 When a process does not behave as expected, they rarely look at signals first. They start with the lifecycle they already know. Is the process running, sleeping, stopped, or a zombie? What are its PID, parent PID, and process group? Which user and groups does it run as? Which file descriptors and sockets does it hold? How much CPU and memory does it use? Are any signals blocked or pending in `/proc/<pid>/status`? Does it have children that outlived it, visible in `pstree`? Is a service manager restarting it, visible in `systemctl status` and `journalctl -u example-worker`?
 
 The tools answer only when connected to a hypothesis. Knowing that `SIGTERM` was delivered but the handler blocked on `accept` without handling `EINTR` explains why the process did not stop, while just seeing that the PID exists does not.
+
+## Standard signals and the real-time signal range
+
+Linux divides signals into two classes. The standard signals run from SIGHUP (1) up to SIGSYS (usually 31), and the kernel treats them as a bitmap of pending notifications. If the same standard signal is delivered while it is already pending, the kernel does not queue a second instance. It keeps the single pending bit set, so the handler runs once. That is why rapid repeated SIGTERMs can collapse into a single delivery.
+
+The real-time signals begin at SIGRTMIN and run to SIGRTMAX, which is typically SIGRTMIN plus 31. These signals are queued. Each send places a separate entry on the pending queue, so if you send SIGRTMIN three times you get three deliveries, up to the limit RLIMIT_SIGPENDING. Real-time signals also carry an accompanying integer value through sigqueue, which makes them the closest thing Unix offers to a small out-of-band message. They are still not a substitute for a real transport, because the queue is bounded and the value is only an int, but they matter when you need to know that an event happened N times rather than at least once.
+
+## The sigaction fields that make a handler reliable
+
+The earlier example calls sigaction with a zeroed struct, which is the minimal correct form. In practice you will want the other fields. sa_mask lists signals that should be blocked while your handler runs. Without it, the same signal can interrupt its own handler, or a related signal can arrive in the middle of cleanup.
+
+sa_flags changes behavior in two ways that matter. SA_RESTART asks the kernel to transparently restart certain interrupted syscalls such as read or accept, so a slow call does not fail with EINTR. That is convenient for simple programs but can defeat a shutdown that relies on the syscall returning. SA_SIGINFO switches the handler to a three-argument form that receives a siginfo_t describing the sending PID, the user ID, and the accompanying value for real-time signals. If you need to know who sent the signal or read a queued value, this flag is required, and the handler type changes from sa_handler to sa_sigaction.
+
+## Receiving signals through a file descriptor in an event loop
+
+A flag and a self-pipe are not the only ways to bridge a signal into normal code. signalfd creates a file descriptor that becomes readable when a signal is pending, and you can hand that descriptor to epoll, poll, or select alongside your sockets and timers. The program then blocks the signal in the normal mask so no handler runs, and the event loop reads a struct signalfd_siginfo that describes what arrived.
+
+This removes a whole class of problems. There is no asynchronous handler touching shared state, no EINTR to handle, and signal receipt becomes just another readable event with a clear ordering relative to your other events. For a server already built around an epoll loop, signalfd is usually cleaner than a handler plus a pipe, because the single loop already owns the wait and the wakeups. The cost is one extra file descriptor and the discipline to keep the signal blocked in every thread that shares the loop.
+
+## Which thread actually receives a signal
+
+In a single-threaded process the question is trivial, but a multi-threaded program has several choices and the kernel applies a rule. A signal sent to the process as a whole, for example by kill, is delivered to exactly one thread that does not currently have that signal blocked. You cannot predict which thread, so if your handler touches shared state you must coordinate, and you should not assume it runs on your main or event-loop thread.
+
+A signal sent with a thread-targeting primitive goes somewhere specific. pthread_kill sends a signal to a named thread within the same process, which is how a worker might be told to interrupt its own blocked call. The underlying system call is tgkill, which targets a thread group and a specific thread ID so the kernel cannot deliver to the wrong process if the thread ID was later reused. When you want every thread to notice, you broadcast to the process group or to each thread explicitly; when you want one, you must name it.
+
+## Why the init process must reap zombies inside a container
+
+The section on orphaned children mentioned that Linux reparents them to PID 1 when their parent exits. That detail becomes critical in containers. A container often runs the service as PID 1, with no separate init. If that service forks workers and then exits or crashes without reaping them, the workers become zombies parented to PID 1, which in a minimal container may not call wait at all.
+
+A process that ignores zombies still consumes a slot in the kernel process table, and an init that never reaps will accumulate them until the table is full and no new process can start. The fix is to run a proper init such as tini or dumb-init as PID 1, or to write your own supervisor that installs a SIGCHLD handler and calls waitpid in a loop until it collects every child. This is also why a well-behaved container supervisor does more than forward signals: it must own the process group, reap all children, and only exit once the group is truly empty.
 
 ## Interview definitions
 

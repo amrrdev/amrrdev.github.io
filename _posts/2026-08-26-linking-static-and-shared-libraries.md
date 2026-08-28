@@ -5,28 +5,18 @@ date: 2026-08-26
 categories: ["System Engineering"]
 tags: [linking, static-linking, dynamic-linking, pic, go-build]
 series: "System Engineering"
-stage: "Stage 4 — From Source Code to Execution"
+stage: "Stage 4 - From Source Code to Execution"
 stage_order: 4
 series_order: 4
 ---
 
-> Stage 4 — From Source Code to Execution  
-> Subject area 4.2 — Linking and Loading  
-> Article 4
-
-## The short version
+The previous chapter looked inside one object file at sections, symbols, and relocations. This chapter follows those files to the next stage, where they are combined. It is the fourth article of Stage 4.
 
 An object file for one package is not a program. It contains code and data, a list of names it defines, a list of names it needs, and notes about where addresses must be patched. Linking collects many such files, decides where each section will live in the final address space, resolves which definition satisfies each need, and writes the correct addresses into the instructions and data references.
 
 Linking can be static or dynamic. Static linking copies the code for the needed symbols into the executable, so the result is self-contained. Dynamic linking leaves a reference to an external shared object and arranges for the loader to bring that object at startup or when it is first called. Shared objects are usually built as position-independent code so they can be placed at different addresses, and symbol visibility controls which names are available to be linked.
 
 The order in which archives are searched, whether a shared object is found at runtime, and whether code is position independent all change the size, startup time, and behavior of the final binary.
-
-## Where this article fits
-
-The previous article looked inside one object file at sections, symbols, and relocations. This article follows those files to the next stage, where they are combined.
-
-You need this before executable formats, because an executable is the result of linking with headers that say how to map it, and before program startup, because lazy binding and dynamic loaders are a consequence of how the program was linked. The same tiny program that was compiled and inspected as an object will now be linked in several ways so you can see the differences.
 
 ## What the linker does
 
@@ -106,7 +96,7 @@ flowchart LR
 
 This is why link order matters when archives are used. Placing a library before the object that needs it can lead to an unresolved symbol even though the library contains the definition. The fix is to place dependents first and their dependencies after, or to repeat the archive.
 
-## Shared objects, symbol visibility, and PIC
+## Shared objects, visibility, and position-independent code
 
 A shared object exposes some symbols for others to use and hides the rest. Visibility controls which global symbols are available to the dynamic linker. A library that makes every internal helper global makes linking easier in the short term, but it increases the chance that two libraries expose the same name and interfere.
 
@@ -132,7 +122,7 @@ A dynamic build that leaves a dependency as a shared object is smaller on its ow
 
 ## Seeing linking with Go
 
-The following sequence is a Level 1 read that you can run on Linux without any extra setup beyond the toolchain. It makes static, PIE, and dynamic differences concrete for the same tiny program.
+The following sequence is a basic read that you can run on Linux without any extra setup beyond the toolchain. It makes static, PIE, and dynamic differences concrete for the same tiny program.
 
 ```bash
 go build -x -o tiny main.go 2>&1 | grep "link"
@@ -143,7 +133,7 @@ nm -g tiny 2>&1 | grep -E " main\.| os\." | head
 
 What it demonstrates is that `go build` invokes `link` after compiling the packages. The `ldd` line shows whether any shared objects are needed. The `nm` lines show global symbols that the linker kept, like `main.main`.
 
-A Level 2 exercise compares visibility and size.
+A second exercise compares visibility and size.
 
 ```bash
 go build -o tiny.base main.go
@@ -172,70 +162,58 @@ The binary that used C was dynamically linked against the system's C library, wh
 
 The team first tried to copy the missing `.so` into the image. That made the program start, but it introduced a second failure. The copied library was built for a different distribution and depended on another library with a different version, so the loader found the file but failed on a symbol version. They fixed the build rather than the image. Pure Go packages stayed statically linked and self-contained. The C helper was replaced with a Go implementation for the container image, and the `CGO_ENABLED=1` build was kept only where the full base image was required. They also added a test in CI that runs `ldd` or `readelf -d` on the artifact and fails the build if an unexpected `NEEDED` entry appears. The link step did not hide a bug. It showed which runtime the binary actually needed.
 
-## How experienced engineers use this
+## How engineers actually use this
 
 They look at linking when a binary is too large, fails to start, or has symbol conflicts. If a binary grew suddenly, they compare `size` and `readelf -S` before and after. If it fails with `undefined symbol` or `cannot open shared object`, they check `ldd`, `readelf -d` for `NEEDED`, and the link order. If two shared objects export the same global name, they reduce visibility so only the intended names are exported.
 
 A useful habit for the tiny program is to always note the build that produced the binary you are running, including `go version`, `GOARCH`, `GOOS`, `CGO_ENABLED`, and the flags in `go build -x`. Those decide whether a reference was resolved statically or left for the loader.
 
-## Interview definitions
+## Definitions
 
-### What is static linking?
+### Static linking
 
 > Static linking copies the code for the symbols a program needs into the executable, so the result is self-contained and does not need those shared objects at runtime, at the cost of a larger file.
 
-### What is dynamic linking?
+### Dynamic linking
 
 > Dynamic linking leaves a reference to a shared object in the executable and lets the loader bring that object at startup, so the file is smaller and can share the library in memory, but it will not start if the object is missing.
 
-### What is symbol resolution?
+### Symbol resolution
 
 > The linker's decision for each undefined reference about which global definition from the inputs satisfies it. An archive member is only extracted when it defines a currently needed symbol, which is why archive order matters.
 
-### What is a shared object?
+### A shared object
 
 > A binary like `libfoo.so` built to be mapped at different addresses in different programs, usually with position-independent code and tables that the loader fills at startup.
 
-### What is position-independent code?
+### Position-independent code
 
 > Code that does not assume a fixed address and instead reaches external symbols through an indirection table that the loader patches after the final base address is chosen, so the same shared object can be used at different addresses.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### Why does archive order matter?
+### Why archive order matters
 
 > The linker walks inputs left to right and only extracts archive members that define a currently undefined symbol. If the archive appears before any object that needs it, that member is skipped and the reference can remain undefined.
 
-### Why can a dynamic program fail to start even though it linked?
+### Why a dynamic build can fail at startup
 
 > Linking recorded that the program needs a shared object, but the loader must find that object at runtime via `rpath`, `LD_LIBRARY_PATH`, or the system library path. If the file is missing or has the wrong version, the loader fails before `main` runs.
 
-### Why is visibility important for shared objects?
+### Why visibility matters for shared objects
 
 > Only global symbols with default visibility are available for dynamic linking. Making every internal helper globally visible increases the chance that two libraries export the same name and interfere, so well-designed libraries hide what is not part of their interface.
 
 ## Common misconceptions
 
-### “A larger object file always makes a larger executable by the same amount.”
+**"A larger object file always makes a larger executable by the same amount."** The linker only extracts from archives the members it needs, and it discards unused sections. An object may be large on its own, but only a part of it may be included.
 
-The linker only extracts from archives the members it needs, and it discards unused sections. An object may be large on its own, but only a part of it may be included.
+**"Static binaries have no dependencies."** A statically linked Go binary still needs the kernel to map it, and a binary built with `cgo` can still need `libc` at runtime. Static for Go code does not automatically mean static for every system library.
 
-### “Static binaries have no dependencies.”
+**"Dynamic linking is just a smaller static link."** A dynamic reference adds a runtime dependency on a file and on the loader's search, plus indirection through tables for position-independent code. It trades file size for a startup requirement.
 
-A statically linked Go binary still needs the kernel to map it, and a binary built with `cgo` can still need `libc` at runtime. Static for Go code does not automatically mean static for every system library.
-
-### “Dynamic linking is just a smaller static link.”
-
-A dynamic reference adds a runtime dependency on a file and on the loader's search, plus indirection through tables for position-independent code. It trades file size for a startup requirement.
-
-### “The linker error tells you which library to add.”
-
-It tells you which symbol is undefined. Which library defines that symbol is something you find with `nm` or `readelf` on the candidate inputs.
+**"The linker error tells you which library to add."** It tells you which symbol is undefined. Which library defines that symbol is something you find with `nm` or `readelf` on the candidate inputs.
 
 ## Summary
 
 Object files describe what is defined and what is needed. The linker decides where each section will live, matches each needed name with a definition, and patches code and data references that depend on those addresses. Static linking copies the needed code into the executable, while dynamic linking records a shared object to be loaded at startup. Archives are only searched for currently needed symbols, so order matters, and shared objects rely on position-independent code and visibility to be safely mapped at different addresses.
-
-## If you want to build this later
-
-Build the tiny program in three ways and record `ls -lh`, `size`, `ldd`, and `readelf -d` for each: a normal `go build -o tiny`, a `go build -ldflags="-s -w" -o tiny.stripped`, and a `go build -buildmode=pie -o tiny.pie`. Then add a small helper package and rebuild, noting which symbols appear in `nm -g` and which disappear when you hide them. Swap the order of an archive you create with `go tool pack` relative to the object that uses it and note when the link fails with an undefined symbol. Write down which artifact you would ship for size, which for debuggability, and which would fail to start if the shared object were missing at runtime.

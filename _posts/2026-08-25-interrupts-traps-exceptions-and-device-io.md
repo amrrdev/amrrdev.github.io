@@ -5,16 +5,12 @@ date: 2026-08-25
 categories: ["System Engineering"]
 tags: [interrupts, traps, dma, device-drivers, polling, mmio]
 series: "System Engineering"
-stage: "Stage 3 — Hardware and Computer Architecture"
+stage: "Stage 3 - Hardware and Computer Architecture"
 stage_order: 3
 series_order: 5
 ---
 
-> Stage 3 — Hardware and Computer Architecture  
-> Subject area 3.2 — Memory Hardware and Ordering  
-> Article 5
-
-## The short version
+The previous chapter explained how cores share memory and how ordering rules decide what a thread can rely on. This chapter is about how the CPU talks to devices, and how user code enters the kernel without constantly checking. It is the fifth chapter of Stage 3.
 
 A CPU spends most of its time running the current thread's instructions. Something else will eventually need its attention. A device may have finished moving data, a program may have asked for a kernel service, or an instruction may have faulted because a page was not mapped.
 
@@ -23,14 +19,6 @@ The hardware has three names for these detours. An interrupt comes from a device
 Devices move data in different ways. Some use memory-mapped registers where a normal load or store reaches the hardware. Others use DMA, which lets the device write directly to RAM without the CPU copying every byte. A driver is the kernel code that sets these mechanisms up and handles their errors.
 
 You feel this in a backend whenever a `read` from disk or a `recv` from the network completes. The completion is an interrupt, then a DMA write, then a handler that wakes your thread. Whether the system uses interrupts or polling changes tail latency and CPU usage.
-
-## Where this article fits
-
-Earlier articles explained how caches and memory ordering let cores share data. This article is about how the CPU talks to devices, and how user code enters the kernel without constantly checking.
-
-You should read this after the CPU execution article, because it uses the same idea of a mode switch, and after the system call article, because a system call is one kind of trap. The next article explains why that mode switch is safe, which is the privilege boundary that makes all of this possible.
-
-Later, when you study `epoll`, `mmap`, and storage, you will see the same path again. A packet arrival wakes `epoll` through an interrupt, and a file read may avoid a copy through DMA.
 
 ## The CPU cannot poll everything
 
@@ -110,9 +98,9 @@ A driver is the kernel code that knows how to do this for one device. It initial
 
 Interrupts and polling trade latency for CPU. At low rates, interrupts are better because the CPU can sleep until work arrives. At very high rates, each interrupt adds overhead, and the system can spend more time entering and exiting handlers than doing useful work. Polling avoids that per-event cost but burns cycles even when there is nothing to do.
 
-A table makes the tradeoff more concrete, but the exact numbers depend on the machine.
+The tradeoff is clearer when compared directly, but the exact numbers depend on the machine.
 
-Interrupts have a small wakeup delay and use little CPU when idle, but they can storm under load. Polling has no per-event wakeup cost and its CPU usage is predictable, but it wastes work when idle. Linux uses a hybrid. At low rates it is interrupt driven, at high rates it polls a budget of packets and then re-enables interrupts. For a backend, you would only enable busy polling like `SO_BUSY_POLL` or `io_uring`'s `SQPOLL` after measuring that p99 improves more than CPU rises.
+At low rates, interrupts have a small wakeup delay and use little CPU when idle, but they can storm under load. At high rates, polling has no per-event wakeup cost and its CPU usage is predictable, but it wastes work when idle. Linux uses a hybrid. At low rates it is interrupt driven, at high rates it polls a budget of packets and then re-enables interrupts. For a backend, you would only enable busy polling like `SO_BUSY_POLL` or `io_uring`'s `SQPOLL` after measuring that p99 improves more than CPU rises.
 
 ```mermaid
 flowchart TD
@@ -156,72 +144,84 @@ A team ran a Go HTTP service at about 80k requests per second. Median latency wa
 
 Adding more HTTP workers did not help, because the bottleneck was not in the workers. The team spread the interrupts across CPUs by writing to `smp_affinity`, enabled RPS to spread protocol processing, and later changed the hottest path to use `io_uring` with polling instead of interrupts. After spreading, p99 fell to a couple of milliseconds and CPU rose to about 55 percent. The extra CPU was the measured cost of better latency. The takeaway was that not every slow backend is slow in application code. Sometimes the notification path itself is saturated.
 
-## How experienced engineers investigate
+## How engineers actually investigate
 
 They start with whether the interrupt is firing at all, which you can see from the count in `/proc/interrupts`. Then they check balance, whether one CPU does all the work. They look at whether softirqs are starving user threads, which shows up in `mpstat` or `perf`. They check `dmesg` for IOMMU or driver errors that would mean DMA was not mapped correctly, and they look at driver messages in the journal. Finally they ask whether the choice between interrupts and polling matches the actual rate, comparing p99 before and after a change instead of guessing.
 
-## Interview definitions
+## How an interrupt reaches a core: APIC, MSI-X, and per-queue vectors
 
-### What is an interrupt?
+A device does not drop an interrupt directly on a CPU. On x86 the local APIC in each core and the I/O APIC in the chipset route interrupts, and the kernel's `/proc/interrupts` counts are per-vector, per-CPU entries. Older systems used a single shared line per device, which forced many devices to share one handler and one CPU, but modern devices use MSI or MSI-X, message-signaled interrupts, where the device writes a small message with a vector number directly to a CPU's local APIC.
+
+MSI-X matters for performance because a device such as a network card can request many vectors, one per receive or transmit queue, and the kernel can steer each vector to a different CPU. That is receive-side scaling: each queue's completions land on the CPU that owns that flow, so cache locality is preserved and no single core becomes the interrupt bottleneck described in the production example. When you see all network interrupts on CPU 0, it usually means the vectors were not spread or the affinity masks were left at their default, which is exactly what the fix in that example changed.
+
+## The trap into the kernel, and the vDSO shortcut
+
+A trap such as `syscall` on x86-64 or `svc` on ARM64 is the door from user code to kernel code. The CPU switches to a privileged mode, saves the user registers, swaps to the kernel stack, and jumps to the kernel's entry point, which then dispatches on the system call number. Every call such as `read`, `write`, or `open` pays this entry and exit cost, which is small but not zero, and it shows up as syscall overhead in profiles.
+
+Not every kernel service needs a trap. Linux maps a small, read-only page of kernel-maintained code into every process called the vDSO, which answers certain calls entirely in user space because they only need values the kernel already shares, such as the current time or the CPU number. `clock_gettime`, `gettimeofday`, and `getcpu` often run through the vDSO without ever trapping, which is why a tight timing loop does not show up as a storm of syscalls. Knowing which calls trap and which do not is part of understanding latency in services that measure time frequently.
+
+## Exceptions classified: faults, traps, and aborts
+
+The word exception covers several different things, and the distinction changes how the CPU resumes. A fault is a synchronous condition that can be corrected and the instruction restarted, such as a page fault: the kernel maps the page and the instruction runs again. A trap is also synchronous but intentional, such as a breakpoint or the `INT3` instruction used by debuggers; the saved instruction pointer points to the instruction after the trap so the program continues from there. An abort is a more serious condition, such as a machine-check or bus error, that may not be recoverable and often ends the process or panics the kernel.
+
+This classification explains the earlier phrasing. A page fault is a fault: once the kernel fixes the mapping, execution resumes as if nothing happened. A `syscall` instruction is closer to a trap: it is intentional and continues after the kernel returns. Confusing them is harmless in conversation but matters when reasoning about which events are restartable and which force a different control flow.
+
+## Interrupt coalescing and the latency trade
+
+Devices do not always raise an interrupt the instant one packet arrives. A network card or storage controller often uses interrupt coalescing: it waits until a few events accumulate or a short timer expires before raising the line, so a burst produces one interrupt instead of thousands. The kernel and `ethtool -C` expose this as parameters such as the completion coalescing delay and packet count.
+
+Coalescing is the device-level twin of the polling decision. More coalescing means fewer interrupts and less CPU, but it adds latency because the first packet waits for the batch. Less coalescing lowers latency at the cost of more interrupts under load. NAPI already handles the high-rate case by switching to polling, but at moderate rates the coalescing delay is the lever, and lowering it is a common way to shave microseconds off p99 receive latency at the price of more softirq time. Measure both sides: a change that helps one request rate can hurt another.
+
+## Definitions
+
+### An interrupt
 
 > An interrupt is an asynchronous signal from a device that tells the CPU to pause the current thread, run a kernel handler, and then return. A network card uses it to say a packet is ready, and the handler wakes the thread that was waiting.
 
-### What is a trap? An exception?
+### A trap and an exception
 
 > A trap is a synchronous, intentional transfer to the kernel, like the `syscall` instruction that asks to open a file. An exception is also synchronous, but it is a fault, like a page fault when an address has no mapped page. Both are looked up in the vector table, but they have different handlers.
 
-### What is a hard interrupt versus deferred work?
+### Hard interrupt versus deferred work
 
 > The hard interrupt is the tiny first part that runs immediately with interrupts disabled. It only acknowledges the device and schedules more work. Deferred work, like a softirq or workqueue, runs later and does the heavier parsing or filesystem work where it can sleep.
 
-### What is DMA?
+### DMA
 
 > DMA lets a device transfer bulk data directly to and from RAM without the CPU copying each byte. The kernel pins the pages, tells the device the address and length, the device writes and then interrupts, and the waiting thread is woken. This is how zero-copy works.
 
-### What is MMIO?
+### MMIO
 
 > Memory-mapped I/O exposes a device's registers as memory addresses. A normal load or store to that address talks to the hardware. The mapping is marked uncacheable, and a read can have side effects, so it needs ordering barriers.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### Why must a handler be short?
+### Why a handler must be short
 
 > It runs in an atomic context with interrupts disabled on that CPU. It cannot sleep, it should not take sleeping locks, and it delays everything else on that core, so heavy work is deferred to a softirq or workqueue.
 
-### When would you use polling instead of interrupts?
+### When polling beats interrupts
 
 > At a sustained high rate where the per-interrupt entry and exit cost is higher than busy polling and you care about tail latency. At low rates polling wastes CPU, so Linux normally uses interrupts and switches to polling only during bursts, like NAPI does.
 
-### How does DMA differ from a CPU copy?
+### DMA versus a CPU copy
 
 > A CPU copy loops on the core, uses cycles, and moves data through caches. With DMA, the kernel programs the device once and the device moves the data. The CPU only handles the final interrupt and wakes the waiter.
 
-### How do you see which device is interrupting?
+### How to see which device is interrupting
 
 > `cat /proc/interrupts` shows per-CPU counts for each vector, `mpstat -I` shows how much time is spent in softirqs, and `dmesg` or `journalctl -k` shows driver errors.
 
 ## Common misconceptions
 
-### “Interrupts are just system calls.”
+**"Interrupts are just system calls."** A system call is a trap that the program runs on purpose. An interrupt comes from a device at an arbitrary time. They use the same entry mechanism but come from different sources and run in different contexts.
 
-A system call is a trap that the program runs on purpose. An interrupt comes from a device at an arbitrary time. They use the same entry mechanism but come from different sources and run in different contexts.
+**"DMA means no CPU work."** DMA avoids copying every byte, but the CPU still has to pin pages, program the device, handle the interrupt, and wake the waiter. The work is smaller, not zero.
 
-### “DMA means no CPU work.”
+**"More interrupts always means faster."** At high rates a storm of interrupts and softirqs can saturate a core and delay user threads. Coalescing or polling can be faster when measured.
 
-DMA avoids copying every byte, but the CPU still has to pin pages, program the device, handle the interrupt, and wake the waiter. The work is smaller, not zero.
-
-### “More interrupts always means faster.”
-
-At high rates a storm of interrupts and softirqs can saturate a core and delay user threads. Coalescing or polling can be faster when measured.
-
-### “MMIO memory is normal RAM.”
-
-It is not. A read can clear a status register, caching is disabled, and ordering requires barriers. It behaves like device communication, not storage.
+**"MMIO memory is normal RAM."** It is not. A read can clear a status register, caching is disabled, and ordering requires barriers. It behaves like device communication, not storage.
 
 ## Summary
 
 Devices and the CPU coordinate through interrupts that arrive from hardware, traps that user code runs intentionally, and exceptions that are faults. The first handler must be tiny and atomic, and heavier work is deferred to softirqs or workqueues. Data reaches devices through memory-mapped registers and reaches RAM in bulk through DMA, both managed by drivers. Polling trades steady CPU for lower tail latency when the rate is high. For a backend, a packet or a disk completion follows the same path every time, from interrupt to DMA to softirq to wakeup, and where that interrupt lands determines latency.
-
-## If you want to build this later
-
-You can study this without custom hardware. Write one program that blocks on a pipe read and another that waits with `epoll`, and compare the wakeup latency. Look at `/proc/interrupts` before and after copying a large file with `dd`, and note how the count grows. If you can, trace softirq time with `mpstat -I` at low and high load, then enable busy polling with `SO_BUSY_POLL` and see how p99 and CPU change. The goal is to decide for your own workload whether the notification path should be interrupt driven or polled.

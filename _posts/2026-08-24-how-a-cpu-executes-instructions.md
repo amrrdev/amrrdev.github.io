@@ -5,24 +5,18 @@ date: 2026-08-24
 categories: ["System Engineering"]
 tags: [cpu, instructions, registers, pipeline, out-of-order]
 series: "System Engineering"
-stage: "Stage 3 — Hardware and Computer Architecture"
+stage: "Stage 3 - Hardware and Computer Architecture"
 stage_order: 3
 series_order: 1
 ---
 
-## The short version
+This is the first chapter of Stage 3, Hardware and Computer Architecture. The earlier stages explained that a system is built around limited resources and that the kernel schedules runnable threads across a few CPUs. This chapter moves one level lower: it explains what the processor actually does with the instructions the compiler produces, because performance and failure behavior often come down to how those instructions are executed.
 
 A CPU executes a program by reading machine instructions, interpreting what each instruction means, operating on registers or memory, and advancing to the next instruction. That description is correct, but it hides the reason modern programs can execute billions of instructions per second.
 
 Modern CPUs do not simply finish one instruction before starting the next one. They fetch and decode several instructions, place independent work in different execution units, predict branches, execute work out of order, and finally make the results visible in the original program order. This lets the hardware use its pipelines and execution units efficiently while preserving the behavior promised by the instruction set.
 
-The most useful systems-engineering question is not only “how many instructions does this code contain?” It is also “which instructions depend on each other, which ones wait for memory, and which parts of the CPU can work in parallel?”
-
-## Where this article fits
-
-This is the first article in Stage 3, Hardware and Computer Architecture. Earlier articles explained that a system is built around limited resources and that performance depends on latency, throughput, locality, and contention. This article moves one level lower: it explains what the processor does with the instructions produced by the compiler.
-
-Later articles will study privilege levels, virtual memory, caches, memory ordering, interrupts, and I/O in more depth. Those topics are easier to understand once the basic execution path is clear.
+The most useful systems-engineering question is not only how many instructions does this code contain. It is also which instructions depend on each other, which ones wait for memory, and which parts of the CPU can work in parallel.
 
 ## From source code to instructions
 
@@ -41,7 +35,7 @@ The same source code can produce different instructions for x86-64 and ARM64. It
 
 For example, a simple loop may be transformed into fewer instructions, unrolled so that several iterations are handled together, or converted to vector instructions that operate on multiple values at once. To reason about performance, you eventually need to inspect the generated code rather than assuming that the source structure maps directly to CPU work.
 
-## What an instruction is
+## What an instruction actually is
 
 An instruction is a binary encoding that tells the processor what operation to perform. The encoding usually contains an operation code, called an opcode, and information about its operands.
 
@@ -96,7 +90,7 @@ The instruction set architecture, or ISA, is the contract visible to software. I
 
 The microarchitecture is the internal design used to implement that contract. It includes the pipeline, caches, branch predictor, execution units, instruction decoder, register renaming machinery, and retirement logic.
 
-Two processors can implement the same ISA and run the same executable while having very different performance. One may have a wider pipeline, better branch prediction, larger caches, or more execution units. This is why “the program uses x86-64” does not tell you how fast it will run on every x86-64 processor.
+Two processors can implement the same ISA and run the same executable while having very different performance. One may have a wider pipeline, better branch prediction, larger caches, or more execution units. This is why the program uses x86-64 does not tell you how fast it will run on every x86-64 processor.
 
 The ISA tells the compiler what behavior is allowed. The microarchitecture determines how efficiently a particular sequence of allowed instructions runs.
 
@@ -122,17 +116,17 @@ gantt
     section Instruction 1
     Fetch       :a1, 0, 1
     Decode      :a2, 1, 1
-    Execute     :a3, 2, 1
+    Execute      :a3, 2, 1
     Write       :a4, 3, 1
     section Instruction 2
     Fetch       :b1, 1, 1
     Decode      :b2, 2, 1
-    Execute     :b3, 3, 1
+    Execute      :b3, 3, 1
     Write       :b4, 4, 1
     section Instruction 3
     Fetch       :c1, 2, 1
     Decode      :c2, 3, 1
-    Execute     :c3, 4, 1
+    Execute      :c3, 4, 1
     Write       :c4, 5, 1
 ```
 
@@ -210,7 +204,7 @@ This is speculative execution. If the prediction is correct, the CPU has saved t
 
 Predictable branches are usually easier for the processor than branches whose outcome changes in an irregular pattern. This does not mean that every branch should be removed or replaced with clever arithmetic. Branchless code can introduce extra operations, harder-to-read logic, or memory accesses that are worse than a well-predicted branch. Measure the real workload.
 
-Speculation is also relevant to security. A CPU may perform work speculatively even though the architectural result will later be discarded. Some historical vulnerabilities showed that discarded speculative work could influence microarchitectural state, such as caches, in ways observable by an attacker. The security details belong in the later security articles, but the important foundation is that “not architecturally committed” does not always mean “had no physical effect inside the processor.”
+Speculation is also relevant to security. A CPU may perform work speculatively even though the architectural result will later be discarded. Some historical vulnerabilities showed that discarded speculative work could influence microarchitectural state, such as caches, in ways observable by an attacker. The security details belong in the later security articles, but the important foundation is that not architecturally committed does not always mean had no physical effect inside the processor.
 
 ## Loads, stores, and why memory matters
 
@@ -264,7 +258,7 @@ The CPU continues to execute instructions according to its architecture. The ker
 
 The operating system does not normally inspect every instruction or decide the order of independent instructions inside a thread. That work belongs to the CPU. This boundary is important: the scheduler controls thread-level execution, while the processor controls instruction-level execution within the running thread.
 
-## A performance example: dependency versus available parallelism
+## A performance example
 
 Compare these two loops conceptually:
 
@@ -325,56 +319,74 @@ The most valuable habit is to connect three views of the same behavior:
 
 Systems engineers use all three because each view hides something important.
 
-## Interview definitions
+## SIMD and vector instructions: data parallelism inside one core
 
-### What does a CPU do when it executes an instruction?
+So far the operations have applied to one value at a time. Most modern CPUs also provide vector instructions, called SIMD for single instruction, multiple data, that operate on several values packed into one wide register. x86-64 calls these SSE, AVX, and AVX-512, while ARM64 calls them NEON. A single vector add can add four, eight, or sixteen values at once, which is why copying or transforming arrays can be many times faster than scalar code.
+
+Compilers often perform this automatically through auto-vectorization when a loop is simple and the data is laid out contiguously. You can also write it explicitly with intrinsics or with a language's SIMD library. The payoff is large for image processing, checksumming, compression, and any loop that touches independent elements, but it disappears when the loop has complex control flow, scattered memory access, or dependencies between iterations. A program that wants vector speed should keep its hot loops simple, aligned, and branch-free, then confirm with `perf` that vector instructions actually appear in the disassembly.
+
+## Instruction latency versus throughput: why dependency chains dominate
+
+Each instruction has two related costs. Latency is how many cycles the result takes to be ready, so a later instruction that needs that result cannot start until then. Throughput, often given as reciprocal throughput, is how often the execution unit can start another independent instruction of that kind. An add may have a latency of one cycle but a throughput that lets the CPU start a new one every cycle, so a chain of dependent adds is limited by latency, while many independent adds are limited only by how many the scheduler can issue.
+
+This distinction explains the partial-sum example earlier. A single running total creates a dependency chain whose length equals the number of additions, so it is limited by add latency no matter how wide the CPU is. Multiple partial sums create several shorter chains that the superscalar engine runs in parallel, limited by throughput instead. When you profile a tight loop, the question is not only how many instructions it has but whether its critical path is a long single chain or many short ones that the hardware can overlap.
+
+## The pipeline as front-end and back-end, and simultaneous multithreading
+
+A modern core is usually described as two halves. The front-end fetches and decodes instructions, breaks them into micro-operations, and feeds them into a decoded instruction cache so repeated code does not pay the decode cost again. The back-end allocates registers, renames them to remove false dependencies, schedules micro-operations onto execution units, executes them, and retires them in order. A performance problem can live in either half: a large, cold code path can starve the front-end, while a dependency chain or a busy execution unit can starve the back-end.
+
+Simultaneous multithreading, called Hyper-Threading on Intel, lets two hardware threads share one core's execution resources. The scheduler sees two logical CPUs, but they compete for the same decoders, caches, and arithmetic units. SMT helps when one thread is stalled waiting for memory and the other can use the idle units, which raises total throughput. It does not make a single thread run faster, and two threads that both want the same busy unit get less than each would alone. This is the CPU-side view of the sibling CPUs discussed in the scheduling chapter: the operating system sees two CPUs, but they are one execution engine shared by time and by stalls.
+
+## Store buffers and store-to-load forwarding
+
+When a store writes a value to memory, the CPU does not always wait for it to reach the cache before continuing. It places the store in a store buffer and lets later instructions proceed, committing the store to the cache hierarchy later. If a later load reads the same address, the CPU can forward the value directly from the store buffer instead of waiting for memory, which keeps a single thread fast even though the store has not yet become globally visible.
+
+This internal forwarding is why a normal program sees its own writes immediately, even though another core may not see them until the store is committed and propagated. The gap between a value being written by one thread and observed by another is exactly what the memory-ordering chapter examines, and the store buffer is the hardware reason it exists. Understanding that a store is locally instant but globally delayed is the bridge from how one CPU executes instructions to how several CPUs agree on memory.
+
+## Definitions
+
+### What execution means
 
 > A CPU executes machine instructions by fetching and decoding them, operating on registers or memory, and updating the architectural state while advancing the instruction pointer.
 
-### What is the difference between an ISA and a microarchitecture?
+### ISA versus microarchitecture
 
 > An ISA defines the instructions and behavior visible to software, while a microarchitecture is the internal CPU design used to implement that contract.
 
-### What is out-of-order execution?
+### Out-of-order execution
 
 > Out-of-order execution allows a CPU to execute ready, independent instructions before earlier instructions that are waiting, while retiring results in program order so software observes the required behavior.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### Why does out-of-order execution not change the program's result?
+### Why reordering preserves the result
 
 > The processor may execute independent operations in a different internal order, but it preserves the architectural rules of the ISA and retires results in program order. This also allows it to present a precise state when an exception occurs.
 
-### What limits instruction-level parallelism?
+### What limits parallelism
 
 > True data dependencies, branch decisions, limited execution resources, and memory latency can prevent instructions from running in parallel. The CPU can hide some waiting with independent work, but it cannot remove a dependency that the algorithm requires.
 
-### What does a context switch have to do with CPU execution?
+### Context switches and execution
 
 > The kernel saves one thread's architectural register state and restores another thread's state. The CPU then executes the new thread's instructions; scheduling between individual instructions remains the processor's responsibility.
 
 ## Common misconceptions
 
-**“The CPU executes one line of source code at a time.”** Source lines are not CPU instructions. One source statement can become many instructions, several statements can be optimized together, and some statements can disappear completely.
+**"The CPU executes one line of source code at a time."** Source lines are not CPU instructions. One source statement can become many instructions, several statements can be optimized together, and some statements can disappear completely.
 
-**“A higher clock speed always means a faster program.”** Clock speed describes cycles per second, not how much useful work completes per cycle. Pipeline stalls, branch mispredictions, cache misses, dependencies, and execution-unit limits also matter.
+**"A higher clock speed always means a faster program."** Clock speed describes cycles per second, not how much useful work completes per cycle. Pipeline stalls, branch mispredictions, cache misses, dependencies, and execution-unit limits also matter.
 
-**“Out-of-order execution means the program runs in a different order.”** Internal execution can be reordered, but the processor preserves the architectural behavior required by the ISA and retires results carefully.
+**"Out-of-order execution means the program runs in a different order."** Internal execution can be reordered, but the processor preserves the architectural behavior required by the ISA and retires results carefully.
 
-**“RISC is fast and CISC is slow.”** These labels describe ISA design traditions. Modern performance depends on the complete implementation, compiler output, workload, memory behavior, and processor design.
+**"RISC is fast and CISC is slow."** These labels describe ISA design traditions. Modern performance depends on the complete implementation, compiler output, workload, memory behavior, and processor design.
 
-**“A branchless rewrite is automatically faster.”** Removing a branch can help when prediction is poor, but it can also add instructions or memory work. Measure both versions on realistic input.
+**"A branchless rewrite is automatically faster."** Removing a branch can help when prediction is poor, but it can also add instructions or memory work. Measure both versions on realistic input.
 
-**“A memory access has one predictable cost.”** The cost depends on where the data is found, whether the access is dependent on earlier work, whether other cores are modifying it, and whether the access causes translation or cache misses.
+**"A memory access has one predictable cost."** The cost depends on where the data is found, whether the access is dependent on earlier work, whether other cores are modifying it, and whether the access causes translation or cache misses.
 
 ## Summary
 
 The CPU executes an architectural instruction stream, but it does so using a much more complicated internal machine. It fetches ahead, predicts control flow, decodes several instructions, tracks dependencies, executes ready work, and retires results in order.
 
 The key question is whether the processor has useful independent work available. A program slows down when instructions depend on a long chain, wait for memory, compete for an execution resource, or repeatedly mispredict control flow. The only reliable way to understand a real case is to connect the source code, the generated instructions, and measurements.
-
-## If you want to build this later
-
-Build a small **CPU behavior laboratory** in C. Include benchmarks for a dependency chain, several independent accumulators, predictable branches, unpredictable branches, and sequential versus scattered array access. Add a command-line option for the input size.
-
-For each benchmark, record the runtime, inspect the disassembly, and collect `perf stat` counters when Linux is available. Write a short explanation for every difference you observe. The purpose is not to create a production benchmark suite; it is to train yourself to explain CPU behavior using evidence instead of only source-level intuition.

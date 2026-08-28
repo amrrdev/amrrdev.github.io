@@ -1,4 +1,4 @@
----
+﻿---
 mermaid: true
 title: "What the Operating System Provides"
 date: 2026-08-22
@@ -10,8 +10,8 @@ stage_order: 2
 series_order: 1
 ---
 
-> Stage 2 — Linux and Operating System Internals  
-> Subject area 2.1 — The Operating System Model  
+> Stage 2 :  Linux and Operating System Internals  
+> Subject area 2.1 :  The Operating System Model  
 > Article 1
 
 ## The short version
@@ -24,10 +24,10 @@ Most backend code does not touch hardware directly. A Go `net.Listen`, a Java `F
 
 ## Where this article fits
 
-This is the overview for **Subject 2.1 — The Operating System Model** — the map before the deep dives.
+This is the overview for **Subject 2.1 :  The Operating System Model** :  the map before the deep dives.
 
-**Prerequisites:** Stage 1 — Systems Programming Foundations (resources, ownership, failure).  
-**Next:** System Calls: How Programs Request Kernel Services — the controlled gate into the kernel. Then Processes, Signals, Virtual Filesystems, Clocks, Scheduling, and Limits.
+**Prerequisites:** Stage 1 :  Systems Programming Foundations (resources, ownership, failure).  
+**Next:** System Calls: How Programs Request Kernel Services :  the controlled gate into the kernel. Then Processes, Signals, Virtual Filesystems, Clocks, Scheduling, and Limits.
 
 Later articles will examine processes, signals, scheduling, memory mappings, filesystems, devices, and Linux resource limits. This article gives the overall model so the backend engineer knows *which* OS service a slow request is waiting for.
 
@@ -37,21 +37,6 @@ A computer contains hardware that can execute instructions, store bits, move dat
 
 The operating system supplies those policies and interfaces.
 
-```mermaid
-flowchart TB
-    Apps[Applications and services]
-    Runtime[Language runtimes and libraries]
-    User[User-space programs]
-    Kernel[Operating-system kernel]
-    Hardware[CPU, memory, storage, network, and devices]
-
-    Apps --> Runtime
-    Runtime --> User
-    User -->|controlled requests| Kernel
-    Kernel --> Hardware
-    Hardware --> Kernel
-    Kernel -->|results and events| User
-```
 
 User space is the part of the system where ordinary programs run. Kernel space is the privileged part where the operating-system kernel runs. The distinction is not simply about where files are stored. It is a protection boundary enforced by the processor and operating system.
 
@@ -79,40 +64,6 @@ The operating system is therefore both a resource manager and a protection syste
 
 The exact design differs between Linux, Windows, macOS, and other systems, but the major responsibilities are similar.
 
-```mermaid
-mindmap
-  root((Operating system))
-    Process management
-      Execution
-      Scheduling
-      Signals
-      Process lifecycle
-    Memory management
-      Address spaces
-      Page mappings
-      Permissions
-      Allocation
-    Files and storage
-      Paths
-      Files
-      Filesystems
-      Page cache
-    Networking
-      Sockets
-      Routing
-      Buffers
-      Network devices
-    Device management
-      Drivers
-      Interrupts
-      DMA
-      Device files
-    Security
-      Users
-      Permissions
-      Capabilities
-      Isolation
-```
 
 These services are not independent. A network socket is represented through file-descriptor-like state. A process has a virtual address space. A file read may use memory for caching and CPU time for copying data. Security checks can affect access to files, processes, devices, and network operations.
 
@@ -133,13 +84,6 @@ The operating system gives a process:
 
 Two processes can run the same executable but have different arguments, environment variables, open files, memory contents, and permissions.
 
-```mermaid
-flowchart LR
-    Executable[Program image] --> P1[Process A]
-    Executable --> P2[Process B]
-    P1 --> State1[Its memory, files, identity, and threads]
-    P2 --> State2[Its memory, files, identity, and threads]
-```
 
 The operating system creates, schedules, pauses, resumes, and terminates processes. It also provides ways for processes to communicate and for a parent to observe a child's exit.
 
@@ -151,16 +95,6 @@ The CPU can execute only a limited amount of work at one time. The operating sys
 
 When a thread is waiting for a file, network operation, lock, or timer, it may not need CPU time. The scheduler can run another thread instead. When the operation becomes ready, the waiting thread can become runnable again.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Runnable
-    Runnable --> Running: scheduler selects thread
-    Running --> Runnable: time slice or preemption
-    Running --> Waiting: blocks on I/O, lock, or timer
-    Waiting --> Runnable: event becomes ready
-    Running --> Terminated: thread exits
-    Terminated --> [*]
-```
 
 Scheduling is not only about fairness. It affects latency, throughput, priorities, CPU affinity, cache locality, and behavior under overload. A process may have enough total CPU capacity but still experience delays because its threads are waiting behind other work or competing for a lock.
 
@@ -172,13 +106,6 @@ The operating system gives each process a virtual address space. A virtual addre
 
 This gives processes the impression that they own a large, private memory space even though physical memory is shared.
 
-```mermaid
-flowchart LR
-    P1[Process A virtual address space] --> MMU[Hardware address translation]
-    P2[Process B virtual address space] --> MMU
-    MMU --> RAM[Physical memory]
-    MMU --> Storage[Storage for selected pages]
-```
 
 The operating system uses memory protection to prevent a process from normally reading or writing another process's memory. It also marks regions as readable, writable, or executable and manages page faults when a process accesses a page that needs operating-system attention.
 
@@ -201,24 +128,6 @@ The operating system provides a file interface so programs can store and retriev
 
 A file is a named object with data and metadata. A filesystem organizes files, directories, permissions, timestamps, and storage allocation. The operating system resolves a path, checks access, finds the relevant filesystem objects, and moves data through the page cache or storage device.
 
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant Kernel as Kernel
-    participant FS as Filesystem
-    participant Device as Storage device
-
-    App->>Kernel: Open path
-    Kernel->>FS: Resolve path and check permission
-    FS-->>Kernel: File object
-    Kernel-->>App: File descriptor
-    App->>Kernel: Read data
-    Kernel->>FS: Find file blocks
-    FS->>Device: Read if not cached
-    Device-->>FS: Data
-    FS-->>Kernel: Data
-    Kernel-->>App: Bytes or error
-```
 
 The file abstraction hides physical details, but storage latency, caching, durability, permissions, and filesystem semantics can still affect the program.
 
@@ -301,21 +210,6 @@ User space is the restricted execution environment for ordinary programs. Kernel
 
 The CPU has modes that control which instructions and memory regions code may access. When a user-space program needs a privileged service, it performs a system-call transition. The processor changes execution mode, the kernel validates the request, performs or starts the operation, and then returns to user space.
 
-```mermaid
-sequenceDiagram
-    participant App as User-space program
-    participant CPU as CPU protection mechanism
-    participant Kernel as Kernel
-    participant HW as Hardware
-
-    App->>CPU: Request protected operation
-    CPU->>Kernel: Enter privileged mode
-    Kernel->>Kernel: Validate pointer, identity, and permissions
-    Kernel->>HW: Perform or schedule operation
-    HW-->>Kernel: Result or event
-    Kernel-->>CPU: Return value or error
-    CPU-->>App: Resume in user space
-```
 
 The kernel must treat user-space input as untrusted, even when the program is running under the same user account. Pointers may be invalid, lengths may be malicious, and memory may change while the kernel is checking or using it. System-call validation is therefore both a correctness and security responsibility.
 
@@ -430,6 +324,40 @@ They ask:
 They then choose a tool that can observe the relevant layer: process inspection, system-call tracing, memory statistics, filesystem tools, socket inspection, packet capture, or a debugger.
 
 The model is not a substitute for evidence. It tells the engineer where to look.
+
+## Namespaces and cgroups form the boundary a container depends on
+
+A container is not a separate operating system. It is a set of processes that the kernel presents with a restricted and isolated view of the machine. Linux provides this isolation through namespaces and cgroups, and runtimes such as Docker and containerd are essentially tools that configure those kernel features on your behalf.
+
+Namespaces change what a process can see. The mount namespace gives a process its own view of the filesystem tree. The PID namespace gives it its own numbering of processes, so the first process inside the container may appear as PID 1 even though the host counts it differently. The network namespace gives it independent interfaces, routes, and firewall rules. The UTS namespace controls the hostname. The IPC namespace separates System V and POSIX message queues. The user namespace maps the container's root user to an unprivileged host user, which is how a container can appear to run as root while holding no real privilege on the host.
+
+cgroups, short for control groups, complement namespaces by limiting and accounting for resource use rather than hiding it. A cgroup can cap the CPU time, memory, and I/O bandwidth available to a group of processes, and it reports their cumulative usage. Namespaces answer "what do I see" while cgroups answer "how much may I use". A container boundary is the combination of both: isolated views plus enforced limits.
+
+## The cost of a system call, and why io_uring reduces the crossings
+
+Every time a program needs a privileged operation it crosses from user space into the kernel through a system call. That crossing is not free. The processor must switch privilege mode, save and restore register state, and possibly invalidate parts of the CPU pipeline and translation caches. On a modern server a single syscall might cost a few hundred nanoseconds to a microsecond, and that cost is paid on every read, write, accept, and poll.
+
+For workloads that perform huge numbers of small I/O operations, those crossings add up to measurable overhead. io_uring is a Linux interface designed to reduce them. Instead of issuing one system call per operation, a program submits many operations through shared memory ring buffers that both the application and the kernel can read. The kernel consumes submitted entries and fills completion entries without a per-operation mode switch. In this model the expensive crossing happens a few times to drain a queue rather than once per operation.
+
+io_uring does not remove the kernel from the path. It changes the economics of entering it, which is why it matters for high-throughput storage and networking services.
+
+## What a service cannot do from user space
+
+A service running in user space cannot do the things that require privilege. It cannot program the network card, change another process's page tables, reboot the machine, or read physical memory that has not been mapped to it. When such an operation is needed, the service must ask the kernel and accept the kernel's decision.
+
+This shapes everyday engineering. A web server cannot bind to port 80 unless it holds the privilege or has been granted the capability to do so. A process cannot guarantee that data has reached disk unless it calls fsync and the device honors it. A program cannot directly reserve a fixed slice of CPU; it can only request scheduling priority and let the kernel decide. The practical lesson is that most failure modes a backend hits are refusals or limits imposed at the kernel boundary, and the service must be written to handle that boundary rather than assume it owns the machine.
+
+## /proc and /sys expose the live state a systems engineer inspects
+
+The kernel exposes its live state through two virtual filesystems, and a systems engineer reads them constantly. /proc presents information about processes and the kernel. Each running process has a directory under /proc/PID containing files such as status, which reports memory and identity; maps, which shows mapped memory regions; fd, which lists open file descriptors; and cmdline, which shows the exact arguments. Reading /proc/loadavg, /proc/meminfo, and /proc/net gives a machine-wide view without special tools.
+
+/sys, the sysfs interface, exposes device, driver, and kernel subsystem state in a structured tree. It is where you inspect block devices, network interfaces, and tunable parameters. Neither filesystem stores data on disk; the kernel builds the contents on read. When you wonder why a process holds a socket open, why memory is accounted a certain way, or why a device behaves differently after a configuration change, these two trees are usually where the answer lives.
+
+## A process and a thread are different units of isolation
+
+At the operating-system level a process and a thread are different units of management. A process is the unit of isolation: it owns an address space, open files, signal handlers, and identity. A thread is the unit of execution: it has its own stack and register state but shares the process's address space and most resources with its sibling threads.
+
+Two processes running the same binary are strongly isolated; one cannot normally read the other's memory, and a crash in one does not corrupt the other. Two threads in the same process share memory by default; one thread's write is visible to the others, which makes communication cheap but also makes a stray pointer or a data race capable of damaging the whole process. The kernel schedules threads, not processes, onto CPUs, which is why a multi-threaded program can keep several cores busy while a single-threaded one is limited to one at a time. Choosing between more processes and more threads is therefore a choice between stronger isolation and cheaper sharing.
 
 ## Interview definitions
 

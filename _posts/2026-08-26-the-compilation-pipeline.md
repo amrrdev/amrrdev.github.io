@@ -5,28 +5,18 @@ date: 2026-08-26
 categories: ["System Engineering"]
 tags: [compilation, go-build, optimization, debug-info, undefined-behavior]
 series: "System Engineering"
-stage: "Stage 4 — From Source Code to Execution"
+stage: "Stage 4 - From Source Code to Execution"
 stage_order: 4
 series_order: 1
 ---
 
-> Stage 4 — From Source Code to Execution  
-> Subject area 4.1 — Compilation  
-> Article 1
-
-## The short version
+Stage 3 ended with the question of how source code becomes an executable in the first place. This chapter begins that answer. Stage 4 follows the path from source text to a running process, and this is its first article.
 
 Source code is text a compiler turns into machine instructions, tables, and metadata that together become a runnable program. That transformation is not one step. The compiler reads the text, checks what it means, builds an intermediate representation of the program, improves that representation, generates assembly for the target processor, assembles it into an object file, and records information to help debugging.
 
 That pipeline decides what instructions the CPU will actually execute and what information a debugger can show you. Optimization levels choose different tradeoffs. More optimization can remove allocations, inline function calls, and keep values in registers, which makes the binary faster but harder to debug and sometimes changes which undefined behavior matters. Debug information records how to map the optimized instructions back to the source lines you wrote.
 
-## Where this article fits
-
-This is the first article in Stage 4, which follows the path from source text to a running process. Earlier stages showed how a CPU executes instructions, how privilege protects the kernel, and how processes are created with `fork` and `exec`. This article shows where those instructions come from.
-
-You do not need to know every pass in a compiler before reading this. You need a mental model of the stages and of what each stage produces, so later articles about assembly, object files, and linking have a place to sit. The next article will look inside one stage, assembly and calling conventions, which is where a function call becomes registers, a stack frame, and a return address.
-
-## The tiny program we will follow
+## The small program we will follow
 
 To keep the series connected, we will use one small Go program through all of Stage 4. It reads a file whose path is in an environment variable and prints its contents. It touches compilation, assembly, symbols, linking, and startup, and it is small enough to inspect with local tools.
 
@@ -128,7 +118,7 @@ The practical habit is to fix the rule violation, not to argue that the optimize
 
 ## Seeing the pipeline with Go
 
-The following sequence is a Level 1 read that you can run without any setup beyond a Go toolchain on Linux. It makes the pipeline concrete for the tiny program.
+The following sequence is a basic read that you can run without any setup beyond a Go toolchain on Linux. It makes the pipeline concrete for the tiny program.
 
 ```bash
 go version
@@ -141,7 +131,7 @@ What it demonstrates is the boundary between source and binary. The first comman
 
 You should see that `go tool compile -S` prints Go assembly with labels like `TEXT main.main(SB), $40-0`. The important line is `TEXT`, which says this is a function body with a stack frame size, and the `$` value, which is how much stack space the function reserves. On `amd64` you will see `AX`, `BX`, `CX` registers, on `arm64` you will see `R0`, `R1`.
 
-A Level 2 exercise compares optimization and debug information.
+A second exercise compares optimization and debug information.
 
 ```bash
 go build -gcflags="all=-l -B" -o tiny.noopt main.go
@@ -170,70 +160,58 @@ A team had a small Go tool that built correctly locally but failed in CI with a 
 
 The team first assumed the CI machine was at fault. The actual causes were in the pipeline. One was that the code relied on the exact timing of a goroutine without synchronization, which is a race. The race only showed as a failure after an inlining decision changed. The other was that the production artifact was the stripped binary, so the crash reporter could not map it. They fixed the race by adding the missing synchronization instead of adding `//go:noinline` everywhere, built a `-race` binary for tests, kept one unstripped binary with `go build -o tiny.dbgsym` for diagnostics, and shipped the stripped one. The pipeline did not hide a bug. It showed where the real bug was.
 
-## How experienced engineers use the pipeline
+## How engineers actually use the pipeline
 
 They start by asking which stage would explain what they see. If a variable is missing in `gdb`, they ask whether debug information was stripped or the value was optimized away. If two binaries behave differently but the source is the same, they compare `go version`, `GOARCH`, `GOOS`, and the flags in `go build -x`. If an inlined function appears to have no frame, they look at `go tool compile -S` or `objdump` rather than assuming the source is wrong.
 
 A useful check for the tiny program is to ask whether the binary contains the file name you wrote. `strings tiny | grep main.go` will show it when debug info is present, and `readelf --debug-dump=info` will show the DWARF entries. When those are stripped, the binary is still correct, but it is harder to observe.
 
-## Interview definitions
+## Definitions
 
-### What is the compilation pipeline?
+### The compilation pipeline
 
 > The sequence where a compiler turns source text into an executable, through parsing and type checking, an intermediate representation, optimization, code generation to assembly, assembly into object files, and linking, with optional debug information to map the result back to source.
 
-### What is an object file?
+### An object file
 
 > A binary file produced for one package that holds machine code in sections, a table of symbols defined or needed, and relocations that say where addresses must be fixed later. It is not runnable until it is linked.
 
-### What is an intermediate representation?
+### An intermediate representation
 
 > A form of the program that is easier for the compiler to analyze and improve than source text, like Go SSA. The compiler optimizes there and only then lowers it to a specific processor's instructions.
 
-### What is debug information?
+### Debug information
 
 > Extra data, often DWARF, that records which address came from which source line and where each variable lives, so a debugger or profiler can show you the program in terms you wrote, even after optimization.
 
-### What is undefined behavior?
+### Undefined behavior
 
 > Code that breaks the language's rules so the standard gives it no meaning, which lets the optimizer assume it never happens. The fix is to make the program valid, not to expect the optimizer to preserve the buggy behavior.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### Why does the same source produce different assembly with different flags?
+### Why the same source gives different assembly
 
 > The intermediate representation is optimized differently before code generation. Inlining, register allocation, and other passes change which instructions are kept and where values live. Debug information then records the new mapping, which is why a variable can appear optimized away.
 
-### Why can a stripped binary still run but be harder to debug?
+### Why a stripped binary still runs
 
 > Stripping removes the symbol table and DWARF that a debugger uses to translate addresses to names and lines. The instructions are still there, so the program runs, but tools have less to show you.
 
-### How does the pipeline explain a race that appears only in CI?
+### How the pipeline exposes a hidden race
 
 > Different toolchain versions or flags can inline or reorder differently, changing timing. The race existed before, but the new code generation makes it visible. The fix is the missing synchronization, not pinning the old compiler version.
 
 ## Common misconceptions
 
-### “Optimization is just making the same instructions faster.”
+**"Optimization is just making the same instructions faster."** It can remove instructions, inline calls, move allocations from heap to stack, and keep values in registers. The same source line may correspond to many instructions, no instruction, or a value that lives in a register instead of memory.
 
-It can remove instructions, inline calls, move allocations from heap to stack, and keep values in registers. The same source line may correspond to many instructions, no instruction, or a value that lives in a register instead of memory.
+**"If the program works at `-O0`, it is correct."** The optimizer is allowed to assume the program follows the language rules. A bug like a data race can hide at low optimization and appear at higher optimization, not because the optimizer is wrong but because the program was already invalid.
 
-### “If the program works at `-O0`, it is correct.”
+**"The compiler output is stable across machines."** Toolchain version, `GOARCH`, `GOOS`, `CGO_ENABLED`, and flags in `go build -x` all affect which instructions are generated. You need to record the build that produced the binary you are debugging.
 
-The optimizer is allowed to assume the program follows the language rules. A bug like a data race can hide at low optimization and appear at higher optimization, not because the optimizer is wrong but because the program was already invalid.
-
-### “The compiler output is stable across machines.”
-
-Toolchain version, `GOARCH`, `GOOS`, `CGO_ENABLED`, and flags in `go build -x` all affect which instructions are generated. You need to record the build that produced the binary to reproduce it.
-
-### “A binary is just its sections.”
-
-An object file and an executable also carry symbols, relocations, and debug information that are not code, but they decide whether a reference can be resolved and whether a debugger can map an address to a line.
+**"A binary is just its sections."** An object file and an executable also carry symbols, relocations, and debug information that are not code, but they decide whether a reference can be resolved and whether a debugger can map an address to a line.
 
 ## Summary
 
 Source text becomes a running program through several stages. Parsing and type checking ensure the program is valid, an intermediate representation makes it easy to improve, optimization chooses tradeoffs between speed and observability, code generation lowers it to the target processor, assembly turns it into object files with sections and symbols, and debug information records how to map the result back to source. The same program can look very different after those stages, which is why you record the toolchain version and flags that built the binary you are debugging.
-
-## If you want to build this later
-
-Extend the tiny program so it has two packages, where `main` calls a function in the other package. Build it with `go build -x -o tiny` and save the compile and link commands. Compare `go tool compile -S` for the package with and without `all=-l`, and note which calls were inlined with `go build -gcflags="-m"`. Inspect the result with `objdump -d --no-show-raw-insn tiny | grep -A 5 "main.main"` and with `readelf --debug-dump=info tiny | head`. Build once more with `go build -ldflags="-s -w"` and compare `ls -lh` and `size`. Write down which optimization you would keep for a production service and which artifact you would keep for debugging, and why the two should not be the same binary when you care about both speed and observability.

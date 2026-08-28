@@ -1,4 +1,4 @@
----
+﻿---
 mermaid: true
 title: "Linux Filesystem and System Interfaces"
 date: 2026-08-23
@@ -11,8 +11,8 @@ series_order: 5
 ---
 
 
-> Stage 2 — Linux and Operating System Internals  
-> Subject area 2.1 — The Operating System Model  
+> Stage 2 :  Linux and Operating System Internals  
+> Subject area 2.1 :  The Operating System Model  
 > Article 5
 
 ## The short version
@@ -39,8 +39,8 @@ For a backend, that means a request that is slow because of open file descriptor
 
 The previous article explained how Linux creates and supervises processes. This article explains where to inspect those processes and the rest of the operating system through virtual filesystems.
 
-**Prerequisites:** Linux Processes, Signals, and Services — you need to know what a PID and process state means before inspecting it.  
-**Next:** Linux Clocks, Hostnames, and Environment — where time, identity, and configuration are exposed, and how to use them for timeouts and service discovery.
+**Prerequisites:** Linux Processes, Signals, and Services :  you need to know what a PID and process state means before inspecting it.  
+**Next:** Linux Clocks, Hostnames, and Environment :  where time, identity, and configuration are exposed, and how to use them for timeouts and service discovery.
 
 Later articles will use these interfaces when discussing memory, devices, filesystems, scheduling, resource limits, containers, security, and debugging. These interfaces are some of the first tools a systems engineer uses when investigating a machine.
 
@@ -50,16 +50,6 @@ A regular file is persistent data stored through a filesystem. A pseudo-file is 
 
 The file-like design is useful because programs already know how to open, read, write, and close file descriptors. The kernel can expose dynamic state through the same general mechanism.
 
-```mermaid
-flowchart LR
-    Tool[Inspection tool] --> Open[open/read/write interface]
-    Open --> Proc["/proc"]
-    Open --> Sys["/sys"]
-    Open --> Dev["/dev"]
-    Proc --> Kernel[Kernel runtime state]
-    Sys --> Kernel
-    Dev --> Driver[Device driver or kernel resource]
-```
 
 Reading a pseudo-file may cause the kernel to format current state into text. Writing to one may change a kernel setting or send a request to a device driver. The meaning depends on the path and the interface contract.
 
@@ -395,6 +385,36 @@ For a service problem, they might ask:
 
 The goal is to turn a vague symptom into a system-level hypothesis that can be checked.
 
+## The virtual filesystem layer hides the differences between disk formats
+
+A program that opens a file does not usually know or care whether the bytes live on ext4, xfs, btrfs, or an overlay. That uniformity exists because the kernel keeps a virtual filesystem (VFS) layer between applications and the concrete on-disk formats. The VFS defines one common set of operations: open, read, write, lookup, stat, and a few others. Each concrete filesystem registers an implementation of those operations and translates them into its own on-disk layout.
+
+The practical result is that the same system call works on every mounted filesystem. ext4, xfs, and btrfs each store metadata and data blocks very differently, but they all present the same inode-and-dentry model to the rest of the kernel. overlayfs is a useful illustration: it stacks a lower read-only layer and an upper writable layer and, through the VFS, makes the combination look like one ordinary directory tree. A container image layered over a base image is the same idea. When you debug a path problem, remember that the path you see is a VFS view; the underlying layers may be spread across several filesystems with different characteristics.
+
+## Watching files change with inotify and fanotify
+
+Sometimes an engineer does not want to poll a directory for changes but instead wants the kernel to report them. inotify watches a path for events such as create, modify, delete, move, and attribute changes. A watcher receives a queue of events and can react as soon as a file changes. fanotify is a coarser interface aimed at access and permission decisions; it is what antivirus scanners and some backup systems use to observe or block file access.
+
+These tools have limits worth knowing before you depend on them. The number of inotify watches a user may register is bounded by `/proc/sys/fs/inotify/max_user_watches`, and the event queue can overflow under heavy load, after which you receive an overflow notice rather than every event. A more subtle limit is that inotify does not cross mount points: if you watch a directory and a different filesystem is later mounted on top of it, events inside that mount are not delivered to your watch. fanotify, by contrast, can be scoped to a whole mount or filesystem and is better suited when you must see activity across a large tree.
+
+## A file name is not the same thing as an inode
+
+It is easy to speak of "a file" as if the name and the data are one object. In the filesystem model they are separate. A directory entry (often called a dentry) maps a name to an inode, and the inode holds the metadata and the pointers to the data blocks. Several names in one or more directories can point at the same inode; those are hard links, and the inode keeps a link count so the system knows how many names refer to it.
+
+The separation explains a behavior that surprises many engineers. When you delete a file with `rm`, you remove a name, which decrements the link count. If a running process still holds the file open through a file descriptor, the link count may reach zero but the inode and its data blocks stay on disk until that last descriptor is closed. The space is not reclaimed and the file can keep growing. You can see this with `lsof` (look for a `DEL` or deleted marker) or by inspecting `/proc/PID/fd`, where the link path ends in `(deleted)` while the descriptor is still valid. This is why a service whose log file was deleted can still fill the disk, and why the fix is usually to restart or signal the process so it closes and reopens the file.
+
+## Bind mounts let a process see a different slice of the tree
+
+A bind mount takes an existing directory or file and makes it appear at another location in the same mount tree. After `mount --bind /srv/data /mnt/view`, the path `/mnt/view` shows the contents of `/srv/data`, and changes through one path are visible through the other. Bind mounts are a building block for the trimmed, overlaid views that containers present.
+
+Inside a container, the kernel uses a mount namespace so the process sees only the mounts placed in its namespace, not the host's full tree. Combined with bind mounts and overlayfs, this lets a container have a read-only `/usr` taken from an image layer, a fresh `tmpfs` at `/tmp`, and an overlaid root that mixes base and application layers. The container's `/proc/mounts` reflects only what is visible in its namespace, which is why a path that exists on the host may be absent or different inside. When you debug a container, check whether the path you expect is actually mounted into its namespace rather than assuming the host tree is visible.
+
+## Other pseudo-filesystems a systems engineer reads, and the open-descriptor limit
+
+Beyond `/proc` and `/sys`, Linux mounts several other pseudo-filesystems that expose kernel state. cgroupfs (typically at `/sys/fs/cgroup` for cgroup v2) shows the resource-control hierarchy: you can read a process's memory limit and current usage, its CPU weight, and its I/O throttle settings. tracefs and debugfs (often under `/sys/kernel/debug`) expose tracing and driver debug state; an engineer investigating latency may read tracefs events, while a driver problem may surface in debugfs. These entries follow the same rule as other pseudo-filesystems: they are generated on read and may be writable controls, not persistent files.
+
+A related limit that turns up in production is the maximum number of open file descriptors. Each process is bounded by `RLIMIT_NOFILE`, which has a soft limit (what the process sees by default, often 1024) and a hard limit (the ceiling it may raise itself to). You can inspect a process's current usage by counting entries in `/proc/PID/fd` and compare it to its limit shown in `/proc/PID/limits`. When a service exhausts this limit, further `open`, `accept`, or `socket` calls fail with "too many open files," even though disk space and memory look healthy. The usual causes are a descriptor leak, an unbounded connection pool, or a limit left at the small default; raising it with `ulimit -n` or a service manager's `LimitNOFILE` is a fix only after the leak itself is addressed.
+
 ## Interview definitions
 
 ### What is `/proc`?
@@ -465,7 +485,7 @@ These interfaces are powerful because they let ordinary tools inspect a complex 
 
 The systems-engineering habit is to begin with a question, inspect the interface that can provide evidence, understand its consistency and permission limits, and connect the observation to a process, resource, device, or service hypothesis.
 
-Clocks, hostnames, and environment — the configuration side of these interfaces — are covered in the next article, *Linux Clocks, Hostnames, and Environment*.
+Clocks, hostnames, and environment :  the configuration side of these interfaces :  are covered in the next article, *Linux Clocks, Hostnames, and Environment*.
 
 ## If you want to build this later
 

@@ -5,28 +5,18 @@ date: 2026-08-26
 categories: ["System Engineering"]
 tags: [threads, goroutines, tls, shared-memory, thread-pools]
 series: "System Engineering"
-stage: "Stage 5 — Processes, Threads, and Concurrency Models"
+stage: "Stage 5 - Processes, Threads, and Concurrency Models"
 stage_order: 5
 series_order: 2
 ---
 
-> Stage 5 — Processes, Threads, and Concurrency Models  
-> Subject area 5.1 — Processes and Threads  
-> Article 2
-
-## The short version
+The previous chapter showed that a process is an isolated container with its own address space and lifecycle. This chapter opens that container and looks at the threads inside it. It is the second article of Stage 5.
 
 A thread is a path of execution inside a process. It has its own registers, its own stack, and its own scheduling state, but it shares the process's address space, file descriptors, and many kernel objects with the other threads of that process.
 
 That sharing is what makes threads cheap to communicate and what makes them hard to use correctly. Any memory that is not deliberately kept private can be read and written by another thread without a system call, and any mistake in that sharing can be seen immediately as corrupt data or a race.
 
 A thread is created, it runs until it finishes or is asked to stop, and it must be joined or detached so its resources are reclaimed. Because threads are not free, programs that do a lot of concurrent work keep them in a pool with a bound, and that bound is where exhaustion appears.
-
-## Where this article fits
-
-The previous article showed that a process is an isolated container with its own address space and lifecycle. This article opens that container and looks at the threads inside it.
-
-You need this before scheduling and affinity, because those topics describe where a thread runs, and before choosing between threads, processes, and events, because the cost model of threads decides which choice is cheaper. The same tiny program that was examined as a process will now be examined as one or many threads that share its memory.
 
 ## User threads and kernel threads
 
@@ -210,7 +200,7 @@ func main() {
 
 The channel is the queue, the four goroutines are the pool, and closing the channel tells workers there will be no more work. The size `4` is where the tradeoff lives. With a very small pool, work waits even though CPUs are free. With a very large pool, many goroutines are runnable at once and compete for the same CPUs and locks, and memory grows with each stack.
 
-A Level 1 read that makes the pool visible without writing a pool is to run the tiny program with `GOMAXPROCS` set and watch the runtime use it.
+A basic read that makes the pool visible without writing a pool is to run the tiny program with `GOMAXPROCS` set and watch the runtime use it.
 
 ```bash
 go run main.go
@@ -273,86 +263,100 @@ The team first raised `GOMAXPROCS` and increased the database connection limit. 
 
 After the change the number of goroutines stayed near the pool size plus a small queue, memory became predictable, and latency degraded gracefully when the pool filled instead of growing without bound.
 
-## How experienced engineers think about threads
+## How engineers actually reason about threads
 
 They start with ownership. Which data is shared and which is private, and which synchronization protects each shared field. Then they ask about lifetime. Which goroutine creates which other goroutine, which one waits for it, and where the shutdown signal flows.
 
 They treat a shared address space as the default, not the exception. Any variable that is not on a thread's stack or in thread-local storage is assumed to be reachable by another thread unless proven otherwise. They use tools where appropriate. `go vet`, `-race`, and `ps` show different parts, but none replaces the design question of who owns what and when it is safe to touch.
 
-## Interview definitions
+## Signals in a multithreaded process: who receives them and how to handle them safely
 
-### What is a thread?
+In a multithreaded process the question of which thread receives a signal has no single answer, and getting it wrong is a classic source of hangs and missed notifications. A signal sent with `kill` to a PID goes to the process, and the kernel picks an arbitrary thread that does not have the signal blocked to handle it. A signal sent with `tgkill` targets a specific thread identifier, which is what a debugger uses to interrupt one thread. Hardware faults such as `SIGSEGV` or `SIGFPE` are delivered to the thread that caused them.
+
+```mermaid
+flowchart LR
+    S[Signal to process] --> K[Kernel picks an unblocked thread]
+    S2[Signal to thread id] --> T[specific thread]
+    All[All threads block signals] --> W[Dedicated sigwait thread]
+    W --> Handle[Handle synchronously, full runtime safe]
+```
+
+The safe pattern is to block the relevant signals in every thread at startup with `pthread_sigmask`, and then have one dedicated thread call `sigwait` to receive them. That converts asynchronous signal handling, which is only allowed to call async-signal-safe functions, into ordinary synchronous handling in a known thread, so you can use locks, logs, and the full runtime safely. A supervisor that wants to stop a pool can then simply signal that thread, or use `tgkill` on a specific worker. If you instead let any thread take the default handler, a `SIGTERM` may land on a worker that is mid-operation, or a `SIGINT` may interrupt a syscall in an unrelated thread.
+
+## Thread lifetime: joinable versus detached, cancellation, and dying while holding a lock
+
+A thread starts as either joinable or detached. A joinable thread keeps its exit status and resources until another thread calls `pthread_join` on it, much like a zombie child. A detached thread, made so with `pthread_detach` or created `PTHREAD_CREATE_DETACHED`, releases its resources the moment it returns, so no join is required, but its exit status cannot be collected. Choosing detached is right for fire-and-forget workers, but only if nothing needs their result.
+
+Cancellation is the harder part. `pthread_cancel` requests a thread to stop, but by default it is deferred: the thread only checks at cancellation points such as `read`, `write`, `poll`, or `pthread_testcancel`, so the thread stops at a defined, safe spot rather than mid-instruction. Async cancellation, if enabled, can stop the thread anywhere and is dangerous because it can leave a lock held or a buffer half-written. The lesson for a systems engineer is the same as the cooperative shutdown pattern earlier: design threads so they reach a safe boundary.
+
+The ugliest case is a thread that dies while holding a lock. If a thread is cancelled or crashes while owning a normal mutex, that mutex is permanently locked and every future acquirer waits forever. POSIX robust mutexes, created with `PTHREAD_MUTEX_ROBUST`, turn this into a recoverable error: the next acquirer gets `EOWNERDEAD`, can repair the shared state, and mark it consistent. For production services that share state across threads and must survive a worker death, robust mutexes are the difference between a stuck process and a recoverable one.
+
+## Per-thread observability: what /proc reveals about each thread
+
+The kernel tracks each thread as its own schedulable entity with its own directory under `/proc/<pid>/task/<tid>`. Inside it you can read `stat` for per-thread scheduling counters, `sched` for the chosen CPU and wait time, `status` for the thread's state and voluntary versus involuntary context switches, and `stack` for the kernel stack backtrace. This is how you see that one worker thread is stuck in `D` state on I/O while the rest are runnable, or that a specific thread is spending all its time in the kernel rather than in your code.
+
+The counts differ from the runtime's. `ps -o nlwp` counts kernel threads, including the Go runtime's worker threads, but not goroutines. `runtime.NumGoroutine()` counts goroutines, which the runtime maps onto far fewer kernel threads. When a profile shows many goroutines blocked on a mutex, the kernel still sees only a handful of threads, so you must read the two views together: the goroutine profile tells you where the program is waiting, and the per-thread `/proc` data tells you what the underlying CPU time and context switches actually were.
+
+## Definitions
+
+### A thread
 
 > A thread is a path of execution inside a process with its own registers, stack, and scheduling state, but sharing the process's address space and most kernel objects.
 
-### What is the difference between a kernel thread and a user thread?
+### Kernel threads versus user threads
 
 > A kernel thread is scheduled directly by the kernel and appears in `ps` as a light-weight process. A user thread, like a Go goroutine, is scheduled by the runtime onto a smaller number of kernel threads, so the kernel sees fewer schedulable entities than the language created.
 
-### What is shared memory?
+### Shared memory
 
 > Shared memory is any memory that more than one thread can reach through the shared address space. By default, heap objects and globals are shared, while a thread's stack and its thread-local storage are private.
 
-### What is thread-local storage?
+### Thread-local storage
 
 > A region where each thread has its own copy of a variable with the same name. It is the place to opt into privacy when sharing would cause contention, like per-thread counters that are merged later.
 
-### What is a thread pool?
+### A thread pool
 
 > A fixed set of threads that take work from a bounded queue. The pool bounds concurrency, reuses stacks, and makes exhaustion visible as queue waiting or rejection instead of unbounded growth.
 
-### What is thread exhaustion?
+### Thread exhaustion
 
 > The condition where a program cannot make progress because every thread it can use is blocked, or the queue of pending work is full, or the memory needed for more stacks is not available. The symptom is usually higher latency and growing queueing before any explicit error appears.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### Why can a program with many goroutines still have few kernel threads?
+### Why many goroutines but few kernel threads
 
 > The Go runtime schedules many goroutines onto a small number of kernel threads, often around `GOMAXPROCS`. The kernel schedules the threads, while the runtime schedules the goroutines. `ps` shows one count and `runtime.NumGoroutine` shows the other.
 
-### Why does a shared address space make bugs easier to create?
+### Why shared memory invites bugs
 
 > Any heap or global that is not kept on a stack or in thread-local storage can be read and written by another thread without a system call. A mistake is visible immediately as corrupted data or a race, and the detector can only find races that happened in the run it observed.
 
-### When would you use thread-local storage?
+### When to use thread-local storage
 
 > When many threads update the same counter or buffer and you want to avoid the coherence traffic of a single shared location. Each thread writes its own copy and the copies are merged infrequently, which trades immediate visibility for less contention.
 
-### How do you shut down a thread safely?
+### Shutting a thread down safely
 
 > Cooperatively. Signal the thread with a context or channel, have it notice the signal at a point where it does not hold a lock that would be left inconsistent, release its resources, and return, rather than terminating it abruptly.
 
-### How do you size a thread pool?
+### How to size a thread pool
 
 > By measuring the concurrency the work actually needs, the time a worker holds a thread, how long tasks wait in the queue, and which downstream resource saturates first. A pool that is too small leaves CPUs idle, while one that is too large adds memory, contention, and queueing without more useful throughput.
 
 ## Common misconceptions
 
-### “Threads share nothing by default.”
+**"Threads share nothing by default."** Inside a process, the opposite is true. Stack and thread-local storage are private, but heap, globals, and descriptor tables are shared unless you make them private.
 
-Inside a process, the opposite is true. Stack and thread-local storage are private, but heap, globals, and descriptor tables are shared unless you make them private.
+**"More threads always give more concurrency."** More runnable threads can help while there are independent CPUs and no shared bottleneck, but beyond that they add switching, memory for stacks, and contention without more useful work.
 
-### “More threads always give more concurrency.”
+**"A goroutine is a kernel thread."** It is a user thread managed by the Go runtime. The kernel schedules the smaller number of underlying threads, not the large number of goroutines.
 
-More runnable threads can help while there are independent CPUs and no shared bottleneck, but beyond that they add switching, memory for stacks, and contention without more useful work.
+**"Thread-local storage is the same as a global."** The name is the same, but each thread has its own copy. A write in one thread does not affect the copy in another, which is why it helps with contention.
 
-### “A goroutine is a kernel thread.”
-
-It is a user thread managed by the Go runtime. The kernel schedules the smaller number of underlying threads, not the large number of goroutines.
-
-### “Thread-local storage is the same as a global.”
-
-The name is the same, but each thread has its own copy. A write in one thread does not affect the copy in another, which is why it helps with contention.
-
-### “Closing a descriptor in one thread is safe for others.”
-
-The descriptor table is shared. Closing in one thread affects every other thread that shares it, and a new descriptor can reuse the same number, so a later operation may act on the wrong file.
+**"Closing a descriptor in one thread is safe for others."** The descriptor table is shared. Closing in one thread affects every other thread that shares it, and a new descriptor can reuse the same number, so a later operation may act on the wrong file.
 
 ## Summary
 
 A process gives you an isolated address space. Threads give you many execution paths inside that space. Kernel threads are what the kernel schedules, while user threads like goroutines are what the runtime schedules onto them. By default, memory is shared, with a thread's stack and its thread-local storage as the places that are private. Pools bound how many threads can run at once, and exhaustion shows up as waiting, rejection, or growth in memory and queueing. The safe pattern for shutdown is cooperative, where a thread is asked to stop and chooses a safe point to return.
-
-## If you want to build this later
-
-Extend the tiny program so the main goroutine creates a fixed worker pool with a bounded channel. Make the workers touch a shared map, first with a race and then with a correct synchronization where only one goroutine mutates the map. Add a mode where each worker increments a per-goroutine counter in thread-local-like storage and a separate aggregator merges them. Run with `go run -race` to see the race, with `ps` to see kernel threads versus `runtime.NumGoroutine`, and with a blocked downstream to see queue growth. Then add a cancellable context so the main function can signal shutdown and each worker drains or discards pending tasks before returning.

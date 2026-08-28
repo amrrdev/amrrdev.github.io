@@ -5,28 +5,18 @@ date: 2026-08-26
 categories: ["System Engineering"]
 tags: [concurrency, threads, processes, async-io, event-loops, actors]
 series: "System Engineering"
-stage: "Stage 5 — Processes, Threads, and Concurrency Models"
+stage: "Stage 5 - Processes, Threads, and Concurrency Models"
 stage_order: 5
 series_order: 4
 ---
 
-> Stage 5 — Processes, Threads, and Concurrency Models  
-> Subject area 5.2 — Choosing a Concurrency Model  
-> Article 4
-
-## The short version
+The previous chapters opened a process, looked at its threads, and followed those threads to the CPUs and memory near them. This chapter steps back and asks which container and which waiting model to use for a whole program. It is the fourth article of Stage 5.
 
 Concurrency is about dealing with many things at once, not necessarily doing them at the exact same instant. A program can be concurrent by using many threads, many processes, a single thread that waits for events, a runtime that schedules many small tasks, or a set of actors that only talk through messages.
 
 Each choice shares different things. Threads share an address space, so they can share memory directly but must coordinate every access. Processes share little, so they communicate through pipes, sockets, or shared mappings that are created on purpose. An event loop shares one thread and never runs two handlers at the same time, so it avoids many races by construction. Async runtimes and coroutines look like blocking code but suspend rather than block a thread. Actors isolate state inside one owner and only communicate with messages. Structured concurrency adds the rule that a parent waits for its children and owns their cancellation.
 
 There is no best model. The right choice depends on what is shared, how failures should be contained, and whether the work is limited by CPU, by waiting, or by coordination.
-
-## Where this article fits
-
-The previous articles opened a process, looked at its threads, and followed those threads to the CPUs and memory near them. This article steps back and asks which container and which waiting model to use for a whole program.
-
-It builds on processes and threads, on scheduling and affinity, and on the system call boundary where blocking happens. Later articles about queues and pipelines will assume you have chosen a model for the stages and can decide where a queue should live and who should own cancellation.
 
 ## Multi-threading
 
@@ -36,7 +26,7 @@ This sharing makes communication cheap. A producer can put a pointer to a buffer
 
 Threads work well when the work shares a lot of state that is naturally in memory, when latency matters and context switches are cheaper than process switches, and when the program is prepared to protect or partition the shared state. The cost is that the program must get every access right. A single missed lock or an inconsistent ordering can corrupt the shared structure, and the fault is not contained to one thread. An address fault or an invalid file descriptor close can affect the whole process.
 
-A Level 1 read that shows threads in the kernel is the same `ps` view from the thread article, but with a shared address space.
+A basic read that shows threads in the kernel is the same `ps` view from the thread article, but with a shared address space.
 
 ```bash
 go build -o tiny main.go
@@ -260,7 +250,7 @@ Failure behavior is often the deciding factor. A process pool contains a crash t
 
 A useful check is to ask three questions for each candidate. What is shared by default and what must be made private on purpose. Where does a failure stop and what must be restarted or reconciled. And what is the bottleneck, CPU, waiting, or coordination, and how does the model move waiting off the limited resource.
 
-A Level 1 read that makes the choice visible is to run the tiny program in two forms.
+A basic read that makes the choice visible is to run the tiny program in two forms.
 
 ```bash
 go run tiny.go &
@@ -272,82 +262,94 @@ ps -o pid,nlwp,cmd -p $!
 
 What it demonstrates is that the number of kernel threads the kernel schedules is not the same as the number of concurrent tasks the language sees. The first program with many processes shows many PIDs, the second with many goroutines shows one PID with many logical tasks.
 
-A Level 2 exercise compares behavior under failure. Start a multi-process pool and kill one worker, then start a multi-threaded program and cause one goroutine to panic without recovery, and note which other work survives in each case.
+A second exercise compares behavior under failure. Start a multi-process pool and kill one worker, then start a multi-threaded program and cause one goroutine to panic without recovery, and note which other work survives in each case.
 
-## Interview definitions
+## Readiness models across platforms: epoll, kqueue, and IOCP
 
-### What is concurrency vs parallelism?
+Linux `epoll` is a readiness model: it tells you a descriptor can be read or written without blocking, and then your code performs the `read` or `write`. BSD and macOS offer `kqueue`, which is broader and reports readiness for sockets, files, timers, and signals through one interface. Windows offers `IOCP`, a completion model: you issue the operation, and the kernel tells you when it is done, somewhat like `io_uring`'s completion queue on Linux.
+
+```mermaid
+flowchart LR
+    L[Linux epoll] --> R[Readiness: your code reads or writes]
+    B[BSD kqueue] --> R
+    W[Windows IOCP] --> C[Completion: kernel moved bytes, you collect result]
+    U[Linux io_uring] --> C
+```
+
+The distinction changes the shape of your code. A readiness model keeps the actual transfer in your thread, so the loop must drain the descriptor carefully and must not issue a blocking call on it. A completion model lets the kernel move the bytes while your thread does other work, and you collect results from a completion port. A systems engineer who writes cross-platform services meets both, and the reactor pattern maps naturally to readiness models while the proactor pattern maps to completion models. Go's netpoller hides this by presenting a blocking-style API on top of whatever the platform provides.
+
+## Why event loops appeared: the C10K problem and one loop per core
+
+Event loops became mainstream because the old model did not scale. A thread-per-connection server spends most of its time with threads blocked waiting on the network, and at ten thousand concurrent connections that is ten thousand stacks, ten thousand context switches, and memory and scheduler pressure that dwarf the actual work. The C10K problem was the name for this wall, and the answer was to stop allocating a thread per connection and instead have one thread wait for many descriptors at once.
+
+The single-threaded loop is simple, but it uses only one CPU. Modern servers run one event loop per core, sometimes called the reactor-per-core pattern, so each core handles its own set of connections and the loops rarely contend on shared state because each owns its connections. This is why nginx-style and Redis-style designs and many Go programs scale: the runtime or framework spreads connections across loops bound to cores, combining the simplicity of one handler at a time with the parallelism of many cores. The lesson is that the event loop solved a scaling problem, not a correctness one, and its benefit is most visible when most of the work is waiting.
+
+## Limits and gotchas of readiness polling
+
+Readiness polling has sharp edges that surprise people. A regular file descriptor is always ready for `epoll` in practice, because file reads do not block on local disks the way sockets do, so you cannot use `epoll` to wait for disk I/O to become non-blocking; you must use a worker thread or `io_uring` for that. Adding a regular file to an `epoll` set typically surfaces as an error or as constant readiness that busy-loops.
+
+The other edge is the handler that must do real work. A loop that handles ten thousand connections but then blocks on a slow database call or a large computation inside a handler holds up every other connection on that loop. The standard fix is to keep the loop only for I/O readiness and hand blocking or CPU-heavy work to a separate worker pool, then notify the loop when the result is ready. Finally, the number of descriptors a loop watches is bounded by the process's file-descriptor limit, so a loop that opens a connection per request without closing them will stop accepting new ones well before memory runs out. These are the operational limits that decide whether an event-loop design holds up under real traffic.
+
+## Definitions
+
+### Concurrency versus parallelism
 
 > Concurrency is dealing with many tasks by interleaving their execution, while parallelism is running tasks at the exact same time on different CPUs. A single-core event loop can be concurrent without being parallel.
 
-### What is an event loop?
+### An event loop
 
 > A single thread that waits for many descriptors to become ready and runs one handler at a time to completion. No two handlers overlap, so shared state does not need a lock between them as long as a handler does not block.
 
-### What is an async runtime?
+### An async runtime
 
 > A runtime that lets code look like it blocks but actually suspends the current task and runs another task on the same thread. In Go, a goroutine that waits on a network socket is parked by the runtime and resumed when the socket is ready.
 
-### What is a goroutine or green thread?
+### Goroutines and green threads
 
 > A user-space thread the language schedules onto a smaller number of kernel threads. It starts with a small stack and is cheap to create, but a blocking system call the runtime does not know about can still block its carrier.
 
-### What is an actor?
+### An actor
 
 > A concurrency model where each owner holds private state and communicates only through messages. No owner touches another's state directly, so races on shared state are avoided by construction at the cost of copies and message protocol design.
 
-### What is structured concurrency?
+### Structured concurrency
 
 > The rule that a parent task that starts concurrent children waits for them and owns their cancellation and error propagation, so a function does not return while work it started keeps running.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### Why can an event loop be efficient for many connections?
+### Why an event loop scales to many connections
 
 > One thread waits for many descriptors with `epoll`, and handlers run without a context switch between them. The cost is that a handler must not block for a long time, or it delays every other connection.
 
-### When would you choose processes over threads?
+### Choosing processes over threads
 
 > When you want strong isolation so a fault in one worker cannot corrupt another, when workers should run different binaries or with different privileges, and when you are willing to pay for explicit communication through pipes or sockets.
 
-### What does an async runtime not fix?
+### What an async runtime does not fix
 
 > It does not make CPU-bound work free. A long computation without a suspension point still keeps its kernel thread busy. It also does not make a blocking C call that the runtime does not know about stop blocking.
 
-### Why can goroutines be many while kernel threads are few?
+### Why many goroutines but few kernel threads
 
 > The Go runtime multiplexes many goroutines onto a small number of kernel threads. The kernel schedules the threads, the runtime schedules the goroutines onto them, so `ps` and `runtime.NumGoroutine` show different counts.
 
-### How does structured concurrency help shutdown?
+### How structured concurrency helps shutdown
 
 > The parent owns a context and waits for its children. Canceling the context signals every child at a safe point, and `Wait` ensures the parent does not return and leak a child that keeps running.
 
 ## Common misconceptions
 
-### “Concurrency is the same as parallelism.”
+**"Concurrency is the same as parallelism."** It is not. Concurrency is about dealing with many tasks by interleaving, parallelism is about doing work at the exact same time on different CPUs. An event loop can be useful without any parallelism.
 
-It is not. Concurrency is about dealing with many tasks by interleaving, parallelism is about doing work at the exact same time on different CPUs. An event loop can be useful without any parallelism.
+**"More threads always give more throughput."** More threads help while there are independent CPUs and no shared bottleneck. Beyond that they add switching, memory for stacks, and contention without more useful work.
 
-### “More threads always give more throughput.”
+**"An event loop never blocks."** The loop itself blocks in `epoll`, but handlers should not block for a long time. A handler that reads a large file without yielding blocks the whole loop.
 
-More threads help while there are independent CPUs and no shared bottleneck. Beyond that they add switching, memory for stacks, and contention without more useful work.
+**"Async code runs in parallel by itself."** Async code is concurrent by interleaving. It only runs in parallel when the runtime schedules it on multiple threads, which depends on configuration and whether the work has suspension points.
 
-### “An event loop never blocks.”
-
-The loop itself blocks in `epoll`, but handlers should not block for a long time. A handler that reads a large file without yielding blocks the whole loop.
-
-### “Async code runs in parallel by itself.”
-
-Async code is concurrent by interleaving. It only runs in parallel when the runtime schedules it on multiple threads, which depends on configuration and whether the work has suspension points.
-
-### “Goroutines are free.”
-
-They are cheap to create, but each has a stack and each holds resources the work needs. An unbounded number of goroutines that each block on a downstream call still exhausts memory and downstream capacity.
+**"Goroutines are free."** They are cheap to create, but each has a stack and each holds resources the work needs. An unbounded number of goroutines that each block on a downstream call still exhausts memory and downstream capacity.
 
 ## Summary
 
 Threads share an address space and communicate cheaply, but every shared access must be coordinated. Processes share little and communicate through kernel objects, so they isolate failures better at the cost of explicit messages. An event loop avoids preemptive races by running one handler at a time, but handlers must not block. Async runtimes suspend rather than block, coroutines and green threads make many tasks cheap by letting the language schedule them, and actors avoid shared state by using messages. Structured concurrency adds the ownership rule that a parent waits for its children and controls their cancellation. The right model depends on what is shared, where failure should stop, and whether the work is limited by CPU, by waiting, or by coordination.
-
-## If you want to build this later
-
-Build the tiny program in three forms that do the same work, which is to read a list of files and count lines. Build it with a fixed process pool that communicates through pipes, with a fixed thread pool that shares a queue, and with a single-threaded event loop that uses `epoll` or Go's netpoller to wait for readiness. Measure elapsed time, CPU usage, and the number of kernel threads with `ps`. Kill one worker in each form and note which other work survives. Then add a cancellable context that the main function owns and make each form respect it, and compare how cleanly each shuts down when the context is cancelled while tasks are in flight.

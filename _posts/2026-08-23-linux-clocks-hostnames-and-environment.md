@@ -1,4 +1,4 @@
----
+﻿---
 mermaid: true
 title: "Linux Clocks, Hostnames, and Environment"
 date: 2026-08-23
@@ -10,8 +10,8 @@ stage_order: 2
 series_order: 6
 ---
 
-> Stage 2 — Linux and Operating System Internals  
-> Subject area 2.1 — The Operating System Model  
+> Stage 2 :  Linux and Operating System Internals  
+> Subject area 2.1 :  The Operating System Model  
 > Article 6
 
 ## The short version
@@ -34,14 +34,6 @@ A backend often needs three kinds of time. One is for people, like the timestamp
 
 Imagine a request that needs to decide whether to give up. You can picture it as a choice between two clocks.
 
-```mermaid
-flowchart LR
-    App[Backend request] --> Choice{Do you need a calendar date or a duration?}
-    Choice -->|calendar| Wall[wall-clock CLOCK_REALTIME]
-    Choice -->|duration or deadline| Mono[monotonic CLOCK_MONOTONIC]
-    Wall --> Display[logs and certificates]
-    Mono --> Timeout[timeouts and SLOs]
-```
 
 The diagram says most of what you need. If you are showing a time to a person, use the wall clock. If you are measuring how long something took, use the monotonic clock. Getting this wrong creates bugs that only appear when time is corrected.
 
@@ -110,11 +102,6 @@ This inheritance is convenient, but it brings limitations that cause real outage
 
 Good configuration code validates at startup, fails quickly if a required value is missing, states the allowed range and default, and documents whether an old name is still supported.
 
-```mermaid
-flowchart LR
-    Parent[Parent has PORT=8080] -->|inherit at exec| Child[Child starts]
-    Child --> Behavior[Listens on 8080 unless overridden]
-```
 
 Treat writing to `/proc/sys/kernel/hostname` or running `timedatectl set-ntp` as calling a typed kernel API. It changes live state immediately and is not like editing a file that will be read later. A diagnostic command that accidentally writes there can affect the running machine.
 
@@ -160,9 +147,39 @@ The team fixed it in a few places. They made the program check for `DB_HOST` at 
 
 ## How experienced engineers handle this
 
-They ask different questions for each interface. For time, they ask whether the value is for a person or for measuring, and they choose the clock before any code is written. In tests they inject a fake clock so they can simulate a step without changing the real machine. For identity, they ask which name the peer will actually verify — a local hostname, a DNS entry, or a name inside a certificate — and they document which one is authoritative. For environment variables, they ask who sets the value, who inherits it, whether it is a secret, and what happens if it is missing. They validate required keys at boot and restart the process to pick up changes.
+They ask different questions for each interface. For time, they ask whether the value is for a person or for measuring, and they choose the clock before any code is written. In tests they inject a fake clock so they can simulate a step without changing the real machine. For identity, they ask which name the peer will actually verify :  a local hostname, a DNS entry, or a name inside a certificate :  and they document which one is authoritative. For environment variables, they ask who sets the value, who inherits it, whether it is a secret, and what happens if it is missing. They validate required keys at boot and restart the process to pick up changes.
 
 You can see which path a program uses with ordinary tools. `strace -e clock_gettime` shows which clock is asked for. `date` and `timedatectl status` show wall-clock versus NTP discipline. `hostname` and `hostname -f` show the local name versus the DNS name, while `cat /etc/machine-id` shows a more stable identifier. `tr '\0' '\n' < /proc/<pid>/environ` shows exactly what a running service saw at start.
+
+## CLOCK_MONOTONIC_RAW and the older trap of wall-clock leases
+
+`CLOCK_MONOTONIC` is kept close to real time by NTP, which speeds up or slows down its tick so the two stay in agreement without ever jumping. `CLOCK_MONOTONIC_RAW` is not adjusted by NTP at all. It reports the raw rate of the hardware oscillator, so it can slowly drift away from true time, but it tells you exactly how fast the clock source is actually running. Reach for RAW when you want to measure the oscillator itself, for example to detect a crystal that runs fast, or to calibrate one clock against another.
+
+The lease bug is the classic way this topic bites a backend. A distributed lock with a 30-second time to live is often computed from wall-clock time on the holder. If the wall clock steps backward, because an administrator ran `date -s` or a VM resumed from a pause, the holder believes its lease is still valid long after it should have expired, while a second client acquires the same lock thinking the first released it. The result is two writers at once. Compute lease expiry from monotonic time, and when you exchange timestamps between hosts, use a clock both sides trust rather than local wall-clock time.
+
+## Leap seconds, TAI, and the minute that holds sixty-one seconds
+
+Because Earth's rotation is not perfectly uniform, standards occasionally insert a leap second so that civil time stays aligned with the sun. On that day the final minute of UTC has sixty-one seconds, and you may see the timestamp 23:59:60. POSIX systems handle this with a step or a smear, and a step can move the clock backward by a second at midnight, which again breaks any code that subtracts two wall-clock readings.
+
+TAI is International Atomic Time, a continuous count of seconds with no leap seconds ever inserted. UTC is TAI offset by the accumulated leap seconds, so the two differ by an integer number of seconds that grows over the years. If you store an interval as "24 hours from this UTC stamp" and a leap second falls inside it, the real elapsed time is off by a second. For measuring intervals, use monotonic time. For scheduling something across a leap boundary, prefer TAI or a time library that knows the leap-second table, rather than plain wall-clock arithmetic.
+
+## How NTP and chronyd correct drift, and the panic threshold
+
+NTP and chronyd usually avoid jumping the clock. When the local clock is only slightly wrong, they slew it, meaning they nudge `CLOCK_REALTIME` faster or slower by a few milliseconds per second until it matches the server. Slewing keeps the order of events sensible and preserves monotonic behavior. When the error is large, they step the clock instead, which can move it forward or backward in one movement.
+
+For safety, chronyd applies a panic threshold, often 1000 seconds. If the observed offset is larger than the threshold, it refuses to correct the clock and logs an error instead of making a giant jump, because a difference that large usually signals a broken hardware clock or a wrong timezone, not ordinary drift. Tune `maxdistance` and the threshold to your environment. In a virtual machine that was paused for a long time, expect a step on resume, and design your timeouts so a single step does not trigger a retry storm.
+
+## PTP and the need for sub-microsecond agreement between machines
+
+NTP is enough for most backends, giving agreement in the millisecond to sub-millisecond range. When two machines must agree within hundreds of nanoseconds, for example to timestamp market ticks or to order writes in a distributed store, you use PTP, the Precision Time Protocol defined in IEEE 1588. PTP uses hardware timestamping on the network interface to measure the exact delay on each link between a grandmaster clock and a slave, then steers the slave's clock to that reference.
+
+The accuracy depends on the hardware. With switches and cards that support hardware timestamping, PTP reaches sub-microsecond alignment. Without that support it degrades toward NTP-class results. The payoff is that two hosts can stamp the same external event within a fraction of a microsecond, so you can reconstruct a global order of events without forcing every write through a single central sequencer.
+
+## Reading the environment safely and the hostname of a single container
+
+Reading a variable with `getenv` is not free, and in many runtimes it is not safe to call at the same time as `setenv`. `getenv` walks the process-wide environment, so calling it on every request adds cost, and `setenv` can reallocate that environment, which makes concurrent reads unsafe. This is why a server reads its configuration once at startup into its own typed structures and never calls `getenv` in the request path.
+
+Changing the hostname is scoped by the UTS namespace. A container can call `sethostname` and see its own name while the host keeps a different one, because only that namespace is changed. That is why a pod reports `host=web-3` while the node shows something else, and it is another reason the hostname is a local convention rather than a fact you can trust across machines. Validate configuration at startup, store it in your own structures, and treat the hostname as a hint that belongs to one namespace only.
 
 ## Interview definitions
 

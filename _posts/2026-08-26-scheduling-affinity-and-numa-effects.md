@@ -5,26 +5,16 @@ date: 2026-08-26
 categories: ["System Engineering"]
 tags: [scheduling, affinity, numa, load-balancing, priority-inversion]
 series: "System Engineering"
-stage: "Stage 5 — Processes, Threads, and Concurrency Models"
+stage: "Stage 5 - Processes, Threads, and Concurrency Models"
 stage_order: 5
 series_order: 3
 ---
 
-> Stage 5 — Processes, Threads, and Concurrency Models  
-> Subject area 5.1 — Processes and Threads  
-> Article 3
-
-## The short version
+The previous chapter showed that a process holds an address space and that many threads can live inside it. This chapter follows those threads to the CPUs where they actually run. It is the third article of Stage 5.
 
 Scheduling decides which thread runs on which CPU at each moment. Affinity says where a thread is allowed to run. NUMA describes which memory is close to which CPU. Together they decide whether a thread runs quickly on a nearby core with nearby memory or slowly while waiting for a distant core or distant memory.
 
 Load balancing moves runnable threads between CPUs so no CPU is idle while work waits elsewhere. Pinning keeps a thread on a set of CPUs to keep its caches warm or to keep it near a device queue, at the cost of making balance harder. Priority inversion, starvation, and real-time deadlines are the failure modes that appear when priority and affinity are chosen poorly.
-
-## Where this article fits
-
-The previous article showed that a process holds an address space and that many threads can live inside it. This article follows those threads to the CPUs where they actually run.
-
-It builds on the earlier scheduling overview, but it is more specific. There we asked what a context switch costs. Here we ask where that switch should happen and which memory the new thread will touch. The next article will compare larger concurrency models, like many processes versus many threads versus an event loop, and this article's numbers about affinity and NUMA are what let you compare them honestly. Later articles about allocators and page caches will show the same locality principle for memory.
 
 ## How the scheduler sees the machine
 
@@ -89,7 +79,7 @@ func pinnedWork(wg *sync.WaitGroup) {
 
 Pinning helps when you know that a thread and a device queue share a cache domain, or when you want to keep a latency-sensitive thread away from noisy neighbors. It hurts when the pinned CPU becomes the bottleneck while other CPUs could have taken the work, or when a pinned thread touches memory that is far away on a NUMA machine.
 
-A Level 1 read that makes affinity concrete without writing any pinning is to watch where a busy program runs.
+A basic read that makes affinity concrete without writing any pinning is to watch where a busy program runs.
 
 ```bash
 go run cpu_busy.go &
@@ -101,7 +91,7 @@ taskset -pc $pid
 
 What it demonstrates is that the same process appears on different CPUs over time when affinity is wide, and stays where you put it when affinity is narrow. The cost of narrow affinity shows up as higher run queue latency on the chosen CPU.
 
-A Level 2 exercise forces the tradeoff. Run two CPU-bound workers, first with wide affinity and then with both pinned to the same CPU, and compare elapsed time and context switches.
+A second exercise forces the tradeoff. Run two CPU-bound workers, first with wide affinity and then with both pinned to the same CPU, and compare elapsed time and context switches.
 
 ```bash
 go run two_workers.go
@@ -140,9 +130,9 @@ numactl --cpunodebind=0 --membind=1 go run mem_touch.go
 
 What it demonstrates is that the same access pattern with the same CPU can have different times when the memory is bound to the local node versus the remote node. The difference is not always large for one access, but it adds up when the workload touches gigabytes. The earlier cache locality article showed how a core likes data that is already close in caches. NUMA adds that some memory is closer in the first place.
 
-A Level 2 exercise measures whether a real program is sensitive. Run the tiny program's larger variant that touches a few hundred megabytes, bind it both ways, and compare `perf stat` for `cycles` and `cache-misses` and wall time. A workload that is limited by memory bandwidth shows a clearer NUMA effect than one that fits in cache.
+A second exercise measures whether a real program is sensitive. Run the tiny program's larger variant that touches a few hundred megabytes, bind it both ways, and compare `perf stat` for `cycles` and `cache-misses` and wall time. A workload that is limited by memory bandwidth shows a clearer NUMA effect than one that fits in cache.
 
-### First-touch, interleaving, and pinning memory
+### First-touch, interleaving, and memory policy
 
 On Linux, the node where anonymous memory is allocated is often decided by first touch, which means the CPU that first writes the page determines which node's memory backs it. If the main thread allocates and first touches a large buffer on node 0 and then workers on node 1 use it, the buffer stays on node 0 even though the workers run on node 1. Allocating in the worker that will use the memory, or using `mbind` with `MPOL_BIND` or `MPOL_INTERLEAVE` to spread pages, changes the placement.
 
@@ -294,7 +284,7 @@ The team first tried to fix it by pinning all workers to the same socket. Tail l
 
 After the changes `numactl --hardware` still showed two nodes, but workers stayed near their memory, coherence traffic fell, and the run queue on each socket stayed short. The machine did the same work with fewer cycles and more predictable latency, not because they added cores, but because they kept work near the memory it touches and removed the single lock that made priority matter.
 
-## How experienced engineers think about scheduling, affinity, and NUMA
+## How engineers actually reason about scheduling
 
 They start with whether the machine is balanced and where memory lives. Is one socket much busier than the other, is one run queue longer, are many threads migrating, and is the workload's working set near the CPUs that run it.
 
@@ -302,80 +292,99 @@ Then they decide whether the fix is to let the scheduler do more or less. Allowi
 
 For priority they ask whether the shared resource can be removed. A lock that must be held across a priority boundary is a design risk. If it must stay, they use priority inheritance where available or make the holder very short, so inversion cannot last long. For real-time they check the whole path, not just the scheduling class, including page faults, interrupts, and locks.
 
-## Interview definitions
+## Interrupt affinity and IRQ balancing
 
-### What is CPU affinity?
+A thread does not only compete with other threads for a CPU. It also competes with the interrupts the CPU services. Every device, including the network card, disk controller, and timers, raises an interrupt on a CPU to say data arrived or work is due. The kernel's `irqbalance` daemon spreads these across CPUs by default, but the CPU that handles a device's interrupt runs the handler and may cache the device's data structures, which means a thread that processes that data benefits from running on the same CPU as its interrupt.
+
+```mermaid
+flowchart LR
+    NIC[NIC receives packet] --> IRQ[Interrupt on CPU 3]
+    IRQ --> H[Handler plus cache of device data on CPU 3]
+    App[App thread on CPU 3] --> D[Processes packet with warm cache]
+    NIC --> IRQ2[Interrupt on CPU 0]
+    App2[App thread on CPU 1] --> D2[Cold cache, remote access]
+```
+
+The mapping is visible and adjustable. Each interrupt has an entry under `/proc/irq/<num>/smp_affinity` that is a bitmask of allowed CPUs, and `cat /proc/interrupts` shows how many times each IRQ fired on each CPU. For latency-sensitive network work it is common to pin the application threads that handle a queue to the same CPU that services that queue's NIC interrupt, or conversely to move interrupts off the CPUs reserved for latency-critical work so they are not disturbed. Either way, understanding which CPU serves which device is part of understanding the thread's real environment.
+
+## Hyperthreading, SMT, and CPU siblings
+
+On many CPUs each physical core exposes two logical CPUs, called hardware threads or SMT siblings, that share the core's execution units, caches, and translation lookaside buffer. To the scheduler and to `taskset` they look like two separate CPUs, but they are not independent: two busy siblings compete for the same pipelines and for cache capacity, so two CPU-bound threads placed on the same core may each get only part of the core's throughput, while two threads placed on different cores get full execution units.
+
+The relationship is visible with `lscpu`, which prints `Thread(s) per core` and a `CPU:CORE` mapping, or `cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list`. For some workloads you want siblings together, for example two threads that share cache and communicate a lot, and for others you want them apart, for example two latency-critical threads that each want the whole core. Knowing the topology is the prerequisite for any affinity decision, because pinning two heavy threads to CPU 0 and CPU 1 may put them on the same core while CPU 2 and CPU 3 are a different core entirely.
+
+## CPU power management: governors, P-states, and C-states
+
+The CPU does not always run at its maximum frequency, and it does not always stay awake. The `cpufreq` subsystem chooses a P-state, a frequency and voltage level, according to a governor: `powersave` favors low frequency to save energy, `performance` favors the highest frequency even at idle, and `schedutil` scales with load. A latency-sensitive service may see noticeable delay under `powersave` if it waits for the frequency to ramp up, which is why production servers are often set to `performance`.
+
+The deeper effect is C-states, which put a core to sleep to save power when idle. A core in a deep C-state takes longer to wake, adding jitter to the latency of the first request after a quiet period. Real-time and low-latency work often disable deep C-states in the BIOS or via `intel_idle.max_cstate` so the CPU stays responsive, trading power for predictability. Both knobs are outside the scheduler but change what the scheduler can deliver, which is why a sudden latency regression is sometimes a power setting, not a code change.
+
+## Carving out CPUs with isolcpus and nohz_full
+
+Pinning a thread restricts where it may run, but the scheduler can still place other tasks and housekeeping work on that CPU. The kernel boot parameters `isolcpus` and `nohz_full` go further: `isolcpus` removes the listed CPUs from the scheduler's normal balancing so only tasks explicitly pinned there will run, and `nohz_full` stops the periodic timer tick on those CPUs so a pinned thread is not interrupted by the system timer. This is the setup behind low-latency systems such as DPDK packet processing, where a CPU is dedicated to one task and must not be disturbed.
+
+The cost is that those CPUs do not automatically run other work, so the machine has fewer CPUs for general use, and housekeeping such as RCU callbacks and timers must run on the non-isolated CPUs. It is a deliberate, whole-machine decision, not something to set per thread, and it only pays off for a workload that truly needs a quiet, predictable core.
+
+## Definitions
+
+### CPU affinity
 
 > CPU affinity is the set of CPUs a thread is allowed to run on. Pinning is the case where that set is one CPU or a small group, which keeps the thread's caches warm but can make load balance harder.
 
-### What is NUMA?
+### NUMA
 
 > Non-uniform memory access, where the time and bandwidth to access memory depend on which CPU touches which memory. Memory attached to the same socket as the CPU is local and faster, while memory on another socket is remote and slower.
 
-### What is load balancing?
+### Load balancing
 
 > The kernel's work to keep CPUs busy and run queues short, by placing a new runnable thread on a least-loaded CPU and by letting idle CPUs steal work from busy ones.
 
-### What is priority inversion?
+### Priority inversion
 
 > The condition where a lower-priority thread holds a lock that a higher-priority thread waits for, and a medium-priority thread keeps the lower-priority holder from running, so the high-priority thread waits longer than it should.
 
-### What is starvation?
+### Starvation
 
 > The condition where a runnable thread keeps not being chosen because other threads with higher priority or better placement always win, so it makes little progress even though it is ready.
 
-### What is real-time scheduling?
+### Real-time scheduling
 
 > Scheduling that tries to meet deadlines, where a real-time class can preempt normal work and run until it blocks. It helps deadline work but can starve the system if the real-time thread loops or holds a lock needed by others.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### When would you pin a thread?
+### When to pin a thread
 
 > When you want to keep it near its data or near a per-CPU device queue and you have measured that the cache warmth or locality gain outweighs the loss of balance.
 
-### How do you see NUMA effects?
+### How to observe NUMA effects
 
 > Run the same memory-heavy workload with `numactl --membind` on the local node versus the remote node and compare time and cache misses, or look at `numactl --hardware` and `perf` for the node where the memory was allocated.
 
-### How do you fix priority inversion without raising priority?
+### Fixing priority inversion without raising priority
 
 > Remove the shared lock by moving the data to one owner that receives updates through a channel, or make the critical section very short so the inversion cannot last long.
 
-### Why can pinning hurt?
+### Why pinning can hurt
 
 > The chosen CPU can become overloaded while other CPUs are idle, and on NUMA the pinned thread may touch remote memory, so balance and locality get worse even though placement looks more controlled.
 
-### What is the difference between fairness and throughput for the scheduler?
+### Fairness versus throughput
 
 > Fairness gives each runnable thread a reasonable turn, while throughput finishes the most work per second. The scheduler trades the two, and giving one thread more time can increase throughput for that thread while hurting tail latency for others.
 
 ## Common misconceptions
 
-### “Pinning always makes things faster.”
+**"Pinning always makes things faster."** It keeps caches warm, but it can make balance worse and force remote memory accesses, so it can be slower when the pinned CPU is busy.
 
-It keeps caches warm, but it can make balance worse and force remote memory accesses, so it can be slower when the pinned CPU is busy.
+**"NUMA is just about memory size."** Size matters, but NUMA is about which memory is near which CPU. A program can have enough memory and still be slow because it touches the far node.
 
-### “NUMA is just about memory size.”
+**"Priority inversion is just low priority being slow."** It is a specific case where a low-priority holder blocks a high-priority waiter while a medium-priority thread keeps the holder from running. The medium thread is what makes it inversion.
 
-Size matters, but NUMA is about which memory is near which CPU. A program can have enough memory and still be slow because it touches the far node.
+**"Real-time priority makes a program real-time."** The scheduling class is one part. Page faults, interrupts, and locks shared with normal threads also affect whether a deadline is met.
 
-### “Priority inversion is just low priority being slow.”
-
-It is a specific case where a low-priority holder blocks a high-priority waiter while a medium-priority thread keeps the holder from running. The medium thread is what makes it inversion.
-
-### “Real-time priority makes a program real-time.”
-
-The scheduling class is one part. Page faults, interrupts, and locks shared with normal threads also affect whether a deadline is met.
-
-### “Load balancing always helps.”
-
-Moving a thread helps balance, but it also makes the new CPU miss in its caches. Balance helps when a CPU is idle, but not when the cost of moving exceeds the wait it avoids.
+**"Load balancing always helps."** Moving a thread helps balance, but it also makes the new CPU miss in its caches. Balance helps when a CPU is idle, but not when the cost of moving exceeds the wait it avoids.
 
 ## Summary
 
 Scheduling chooses which runnable thread runs on which CPU, affinity restricts where a thread may run, and NUMA says which memory is near which CPU. Load balancing moves work to keep the machine even, pinning keeps work near its data, and the two can conflict. Priority inversion, starvation, and real-time deadlines are the failure modes that appear when priority and placement are chosen poorly. The right choice is not a fixed rule about pinning or priority. It is where the working set lives, how long a thread holds a shared resource, and whether moving work helps balance more than it hurts locality.
-
-## If you want to build this later
-
-Write a program that can start a fixed number of workers that each touch a few megabytes of private buffer and also update a shared counter. First run it with no affinity and record time, `perf` cache misses, and migrations. Then pin the workers to one socket with `taskset` and repeat. Then partition the workers per socket with separate buffers and compare again. Add a mode that binds memory with `numactl --membind` to the local versus remote node. The goal is to see when keeping work near its memory helps, when pinning hurts balance, and how removing a single shared lock changes the picture more than any affinity.

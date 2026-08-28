@@ -5,28 +5,18 @@ date: 2026-08-26
 categories: ["System Engineering"]
 tags: [elf, pe, mach-o, program-startup, aslr, go-runtime]
 series: "System Engineering"
-stage: "Stage 4 — From Source Code to Execution"
+stage: "Stage 4 - From Source Code to Execution"
 stage_order: 4
 series_order: 5
 ---
 
-> Stage 4 — From Source Code to Execution  
-> Subject area 4.2 — Linking and Loading  
-> Article 5
-
-## The short version
+The previous chapter showed how linking collects object files, resolves symbols, and patches relocations. This chapter shows what linking produces and how the kernel and the runtime turn that file into a running process. It is the final article of Stage 4.
 
 An executable file is more than just machine code. It is a structured file with headers that describe how to map it, tables that describe where each piece should live, and metadata that tells the loader where to start.
 
 An object file and an executable look similar, but they serve different stages. An object file is for the linker. It has sections, symbols, and relocations. An executable is for the loader. It has segments that say a range of the file should be mapped at a certain virtual address with certain permissions, an entry point where the first instruction lives, and, when needed, tables that let the loader bring shared objects and fix lazy bindings. When the kernel starts the program, it maps those segments, sets up arguments and environment on the stack, and jumps to the entry point. A small runtime then initializes the language's state before the `main` you wrote runs.
 
 Executable formats differ by platform. ELF is used on Linux, PE on Windows, and Mach-O on macOS, but all three describe the same ideas: headers, sections for the toolchain, segments for the loader, an entry, and data for dynamic loading, plus hardening like address randomization, position-independent code, stack canaries, and non-executable memory.
-
-## Where this article fits
-
-The previous article showed how linking collects object files, resolves symbols, and patches relocations. This article shows what linking produces and how the kernel and the runtime turn that file into a running process.
-
-You need this before processes and virtual memory, because `exec` is the system call that takes an executable file and replaces the current address space with the mappings those headers describe. The same tiny program that was compiled, examined as assembly, and inspected as an object will now be inspected as an executable and traced from `execve` to the first line of `main`.
 
 ## From object to executable
 
@@ -63,7 +53,7 @@ readelf -S tiny | head -n 40
 
 Look at `readelf -h` for `Type`, `Machine`, and `Entry point address`. In `readelf -l`, each `LOAD` line shows `Offset`, `VirtAddr`, `FileSiz`, `MemSiz`, and `Flags` like `R E` or `RW`. In `readelf -S`, the same bytes appear as sections with `Addr`, `Off`, and flags `AX` for execute or `WA` for write-allocate. The executable can be understood either way, as segments to map or as sections to inspect, and both views describe the same bytes.
 
-## ELF, PE, and Mach-O compared in depth
+## ELF, PE, and Mach-O compared
 
 All three formats solve the same problems, but they organize the answers differently. The table below is a reference you can check with `readelf`, `objdump`, or `otool`.
 
@@ -115,7 +105,7 @@ objdump -R tiny | head -n 20
 
 `readelf -l` shows the interpreter path when there is one, `readelf -d` shows the `NEEDED` shared objects, and `objdump -R` shows the dynamic relocations that the loader will patch at startup. For a pure Go `tiny` with `CGO_ENABLED=0`, `NEEDED` is often empty, which is why `ldd tiny` reports `not a dynamic executable`.
 
-## Program arguments, environment, and stack at entry
+## Arguments, environment, and the stack at entry
 
 When the kernel creates a new address space for `execve`, it places argument strings, environment strings, and an auxiliary vector on the stack before jumping to the entry. The auxiliary vector carries information the runtime needs, like the address of the program headers, the page size, and a random value for stack canaries.
 
@@ -135,7 +125,7 @@ sequenceDiagram
     Runtime->>Main: call main.main with prepared stack
 ```
 
-A Level 1 read makes this concrete for the tiny program without any C.
+A basic read makes this concrete for the tiny program without any C.
 
 ```bash
 go build -o tiny main.go
@@ -145,7 +135,7 @@ strings -a tiny | grep -E "TINY_FILE|message.txt" | head
 
 `strace` shows the `execve` that the shell performed for you, including the filename, argument vector, and environment pointer. `strings` shows that the literal `"message.txt"` is in `.rodata` and will be referenced after the stack is set up.
 
-## Runtime initialization before your `main`
+## Runtime initialization before your main
 
 The first instruction in the file is not `main.main`. On Linux a tiny ELF has an entry like `_rt0_amd64_linux` from the Go runtime, which sets up thread-local storage, parses the auxiliary vector, initializes the scheduler and garbage collector, and prepares `os.Args`. Only then does it call the `main` you wrote.
 
@@ -160,7 +150,7 @@ gdb -ex "break main.main" -ex "run" -ex "backtrace" --args ./tiny 2>&1 | head -n
 
 What it demonstrates is the boundary between the file format and the language runtime. The kernel jumps to `e_entry`, the runtime in `_rt0_*` prepares the world that Go code expects, and then `main.main` runs with the stack that already holds `argc` and `envp`. A `panic` before `main` that shows `runtime` frames is not mysterious once you see this chain. It is the runtime initializing.
 
-## Hardening: ASLR, PIE, stack canaries, and non-executable memory
+## Hardening: ASLR, PIE, canaries, and non-executable memory
 
 An executable says what should be mapped, but the loader also decides where and with what protections. Modern systems add several defenses that are visible in the headers.
 
@@ -191,68 +181,56 @@ The file `readelf -l tiny | grep INTERP` showed `/lib64/ld-linux-x86-64.so.2` as
 
 They fixed the pipeline instead of the image. The `scratch` image kept the statically linked pure Go binary built with `CGO_ENABLED=0` and `go build -buildmode=pie -ldflags="-s -w"` for hardening and size, while a separate image based on a full distribution kept the `cgo` binary where it was needed. They added a CI step that runs `readelf -l` and `ldd` on the artifact and fails if an unexpected `NEEDED` appears. The file format did not hide a bug. It described exactly what the loader would need, which is what the error was reporting.
 
-## How experienced engineers use this
+## How engineers actually use this
 
 They look at executable format when a program fails to start, crashes before `main`, or shows a surprising address. If `execve` returns `ENOENT` for a file that exists, they check `readelf -l` for `INTERP`. If a debugger shows raw addresses instead of Go names, they check whether the file was stripped and whether `readelf -S` still has `.debug_info`. If an address is randomized on each run, they check `readelf -h` for `Type: DYN` and `/proc/<pid>/maps` for the actual base.
 
-## Interview definitions
+## Definitions
 
-### What is ELF, PE, and Mach-O?
+### ELF, PE, and Mach-O
 
 > The executable file formats for Linux, Windows, and macOS. Each has a header that says the file type and architecture, a section view that the toolchain uses for debugging, a segment or load command view that the loader uses for mapping, an entry point where the first instruction lives, and data for dynamic linking.
 
-### What is the difference between sections and segments?
+### Sections versus segments
 
 > Sections are the toolchain's view, like `.text` or `.debug_info`, and they keep code separate from debug data. Segments are the loader's view, like a `LOAD` that says a file range should be mapped as a readable and executable region. An executable contains both, but the kernel maps segments at startup.
 
-### What is an entry point?
+### An entry point
 
 > The virtual address in the header where the kernel jumps after mapping the file and its interpreter. For a Go program it points into the runtime's startup code, which initializes the scheduler before calling `main.main`.
 
-### What is the dynamic loader and what are PLT and GOT?
+### The dynamic loader, PLT, and GOT
 
 > The dynamic loader is the program named in `PT_INTERP` or the Windows/macOS loader that maps shared objects at startup. The PLT is a small stub for each imported call and the GOT is a table of addresses that the loader fills. The first call goes through the PLT, consults the GOT, calls the loader to resolve the real address, and later calls use the filled GOT entry.
 
-### What are ASLR, PIE, stack canaries, and NX?
+### ASLR, PIE, canaries, and NX
 
 > ASLR randomizes where the executable and its libraries are mapped each time. PIE is a position-independent executable that can be randomized, with type `DYN`. A stack canary is a random value the kernel places on the initial stack and the compiler checks on return to detect overflow. NX means the stack and data are not executable, so an overflow cannot directly run injected code.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### How do you tell whether a Go program is statically or dynamically linked?
+### Telling static from dynamic in Go
 
 > Run `ldd` and `readelf -d`. A pure Go `tiny` with `CGO_ENABLED=0` often shows no `NEEDED` and `ldd` reports it is not dynamic for Go code. A `CGO_ENABLED=1` binary shows `libc` in `NEEDED`, which must be present at runtime.
 
-### Why does `execve` report `no such file or directory` when the file exists?
+### Why execve reports a missing file
 
 > The error is often about the interpreter named in `PT_INTERP`, not the file itself. `readelf -l` shows that interpreter path, and if that loader file is not in the image, the kernel cannot start the program even though the executable is there.
 
-### Why does a stripped binary still run but a debugger shows less?
+### Why a stripped binary still runs
 
 > Stripping with `-s -w` removes `.symtab` and `.debug_info`, which are section data for tools, not segment data for the loader. The instructions in `LOAD` segments are still mapped, so the program runs, but a debugger or profiler has no names to map addresses to lines.
 
 ## Common misconceptions
 
-### “A binary is just its sections.”
+**"A binary is just its sections."** Sections are for the toolchain. The kernel maps segments. An executable needs both views, and stripping sections does not change which segments are mapped.
 
-Sections are for the toolchain. The kernel maps segments. An executable needs both views, and stripping sections does not change which segments are mapped.
+**"The entry point is `main`."** The entry is the runtime's startup code like `_rt0_*` that prepares thread-local storage and the Go scheduler. `main.main` is called after that preparation.
 
-### “The entry point is `main`.”
+**"The same source gives the same file type everywhere."** The format follows the target. The same Go source built with `GOOS=linux` gives an ELF, with `GOOS=windows` a PE, and with `GOOS=darwin` a Mach-O, because the loader on each system expects that header.
 
-The entry is the runtime's startup code like `_rt0_*` that prepares thread-local storage and the Go scheduler. `main.main` is called after that preparation.
-
-### “The same source gives the same file type everywhere.”
-
-The format follows the target. The same Go source built with `GOOS=linux` gives an ELF, with `GOOS=windows` a PE, and with `GOOS=darwin` a Mach-O, because the loader on each system expects that header.
-
-### “`exec` replaces every byte of the old address space with file bytes.”
-
-It maps segments from the file, places arguments and environment on the stack, and sets up the auxiliary vector. Some regions like `heap` and `thread stacks` are allocated fresh, and hardening decides where and with what permissions each segment is placed.
+**"`exec` replaces every byte of the old address space with file bytes."** It maps segments from the file, places arguments and environment on the stack, and sets up the auxiliary vector. Some regions like `heap` and `thread stacks` are allocated fresh, and hardening decides where and with what permissions each segment is placed.
 
 ## Summary
 
 Source text becomes an executable through headers that say what kind of file it is, sections that keep code, data, and debug information separate, a symbol table and relocations that the linker resolved, and, when needed, a dynamic section that names shared objects and tables for lazy binding. ELF on Linux, PE on Windows, and Mach-O on macOS all describe the same ideas with different tables. At startup the kernel maps the `LOAD` segments, sets up argument, environment, and auxiliary values on the stack, jumps to the entry in the runtime, and the runtime initializes before calling the `main` you wrote. Hardening like PIE for ASLR, non-executable memory, and stack canaries is visible in the same headers.
-
-## If you want to build this later
-
-Build the tiny program four ways and record `file`, `readelf -h`, `readelf -l`, `readelf -S`, `ldd`, and `size` for each: a normal `go build -o tiny`, a pie `go build -buildmode=pie -o tiny.pie`, a stripped `go build -ldflags="-s -w" -o tiny.stripped`, and a cross `GOOS=windows go build -o tiny.exe` or `GOOS=darwin go build -o tiny.macho`. Compare `Type: EXEC` versus `DYN`, note where `PT_INTERP` appears, and note which file has no `.debug_info`. Run `strace -e execve ./tiny` and note the `execve` arguments, then break in `gdb` at `main.main` and walk the initial stack that holds `argc` and `envp`. Keep the unstripped ELF for debugging and ship the stripped or pie binary, and write down which header field made each choice possible.

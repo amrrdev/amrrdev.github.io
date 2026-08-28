@@ -5,12 +5,12 @@ date: 2026-08-24
 categories: ["System Engineering"]
 tags: [cpu, performance, ipc, perf, hardware-counters]
 series: "System Engineering"
-stage: "Stage 3 — Hardware and Computer Architecture"
+stage: "Stage 3 - Hardware and Computer Architecture"
 stage_order: 3
 series_order: 2
 ---
 
-## The short version
+The previous chapter explained how a CPU fetches instructions, uses registers, pipelines work, executes independent operations out of order, and predicts branches. This chapter explains how to observe those mechanisms in a real program. It is the second chapter of Stage 3.
 
 CPU performance is the amount of useful work a processor completes in a given amount of time. A useful first model is:
 
@@ -20,17 +20,11 @@ execution time = instructions × cycles per instruction ÷ clock frequency
 
 This model is not a complete prediction of performance, but it gives us three important questions. How many instructions did the program execute? How many cycles did those instructions require? At what frequency did the processor run?
 
-Modern processors make each question more complicated. The compiler may remove or transform source-level work. The processor may execute independent instructions in parallel, wait for memory, predict branches, and change its frequency because of temperature or power limits. That is why experienced engineers do not stop at “the code looks fast” or “the CPU is running at 4 GHz.” They measure the workload and then build an explanation from the measurements.
+Modern processors make each question more complicated. The compiler may remove or transform source-level work. The processor may execute independent instructions in parallel, wait for memory, predict branches, and change its frequency because of temperature or power limits. That is why experienced engineers do not stop at the code looks fast or the CPU is running at 4 GHz. They measure the workload and then build an explanation from the measurements.
 
 Hardware performance counters are processor-maintained counters that record events such as retired instructions, CPU cycles, branch instructions, branch mispredictions, cache references, and cache misses. Tools such as Linux `perf` read these counters and turn them into evidence about what the CPU was doing.
 
 The goal is not to collect every available counter. The goal is to answer a specific performance question with measurements that distinguish competing explanations.
-
-## Where this article fits
-
-The previous article explained how a CPU fetches instructions, uses registers, pipelines work, executes independent operations out of order, and predicts branches. This article explains how to observe those mechanisms in a real program.
-
-Later articles will study caches, memory locality, memory ordering, interrupts, and I/O in more detail. Here, cache misses and stalls appear as performance signals, but the focus is learning how to measure and reason about them without pretending that one counter explains the whole machine.
 
 ## What performance actually means
 
@@ -153,7 +147,7 @@ flowchart LR
     H --> I
 ```
 
-An explanation such as “IPC is low, so the cache is the problem” is a hypothesis, not a conclusion.
+An explanation such as IPC is low, so the cache is the problem is a hypothesis, not a conclusion.
 
 ## Branch instructions and branch misses
 
@@ -173,11 +167,11 @@ Branch prediction is usually good for stable patterns. A loop that runs the same
 
 Do not treat every branch as a problem. Branches can avoid unnecessary work, protect invalid accesses, and make code clear. Replacing a branch with arithmetic or a lookup can increase instruction count, memory traffic, or security risk. Measure the complete workload.
 
-## Cache references, cache misses, and memory stalls
+## Cache references, misses, and memory stalls
 
 The CPU uses caches to keep recently or frequently used data close to the execution units. A cache hit finds the requested data at that level. A cache miss requires looking in a slower level or in main memory.
 
-Cache counters are easy to misunderstand. “Cache miss” may refer to a particular cache level, a particular type of access, or an event whose meaning depends on the processor. A miss does not always equal a long stall: the request may be served by another cache, overlap with independent work, or be prefetched.
+Cache counters are easy to misunderstand. Cache miss may refer to a particular cache level, a particular type of access, or an event whose meaning depends on the processor. A miss does not always equal a long stall: the request may be served by another cache, overlap with independent work, or be prefetched.
 
 Still, cache-related measurements are valuable when combined with code and memory-access patterns. Sequential traversal often benefits from spatial locality, meaning nearby addresses are used close together in time. Reusing the same data benefits from temporal locality, meaning the same data is used again before it leaves the cache.
 
@@ -203,9 +197,9 @@ If the front end cannot provide decoded instructions quickly enough, execution u
 
 If the back end cannot execute the available instructions quickly enough, the limitation may be arithmetic throughput, load/store capacity, memory latency, dependency chains, or a busy execution unit.
 
-This separation helps avoid vague explanations. “The CPU is slow” is not a diagnosis. A better statement is “the workload is spending cycles waiting for data dependencies” or “the front end is repeatedly redirected by unpredictable branches,” provided measurements support it.
+This separation helps avoid vague explanations. The CPU is slow is not a diagnosis. A better statement is the workload is spending cycles waiting for data dependencies or the front end is repeatedly redirected by unpredictable branches, provided measurements support it.
 
-## Why one counter is never the whole story
+## Why no single counter tells the whole story
 
 Hardware counters are measurements of events, not direct explanations. Several events can occur together, and one event can have multiple causes.
 
@@ -222,7 +216,7 @@ The reliable process is:
 5. Measure again under equivalent conditions.
 6. Explain the result in terms of the workload and hardware.
 
-## Measuring with `perf stat`
+## Measuring with perf stat
 
 On Linux, a common starting point is:
 
@@ -248,7 +242,7 @@ The command measures the complete program, including startup and shutdown. If th
 
 For a process that is already running, `perf stat -p PID` can attach to it. Production profiling requires care: the measurement itself can have overhead, and attaching to a sensitive process may affect behavior. Start with a staging environment or a controlled sample when possible.
 
-## A small benchmark that teaches useful lessons
+## A benchmark that teaches useful lessons
 
 The following program creates three different kinds of work. The first loop contains a serial dependency chain. The second provides several independent accumulators. The third makes branch outcomes depend on input data.
 
@@ -378,58 +372,76 @@ Counters are useful in production, but continuous collection has costs and opera
 
 Teams often use a combination of approaches. They use application metrics for request latency and throughput, system metrics for CPU utilization and load, sampled profiles for hot functions, and targeted hardware-counter runs during an investigation or performance test.
 
-The most useful production question is usually not “what is the CPU doing globally?” It is “which service, endpoint, workload, or deployment changed, and what evidence explains the change?” Correlate CPU measurements with version, input shape, traffic level, and latency percentiles.
+The most useful production question is usually not what is the CPU doing globally. It is which service, endpoint, workload, or deployment changed, and what evidence explains the change. Correlate CPU measurements with version, input shape, traffic level, and latency percentiles.
 
-## Interview definitions
+## What the memory hierarchy costs in cycles
 
-### What are hardware performance counters?
+The performance equation hides a sharp asymmetry. An add that hits registers and L1 cache may retire in a few cycles, but a load that misses every level of cache and reaches main memory can stall for a few hundred cycles on a modern server. The rough magnitudes are worth remembering: L1 cache is often a few cycles, L2 around ten to twenty, L3 tens of cycles, and a main-memory access frequently a few hundred cycles, more if it crosses a NUMA node.
+
+This is why the same instruction count can have wildly different cycle counts. A workload that streams through cache-friendly data may retire several instructions per cycle, while a workload that chases pointers across memory may spend most cycles waiting for the data path. When `perf` shows low IPC and high cache-miss or stall counts, the question is not how many instructions the program ran, but how many of them were stuck behind a memory access. Memory latency, not arithmetic, is the usual ceiling for non-trivial services.
+
+## Finding the hot path with perf record and flame graphs
+
+`perf stat` tells you what kinds of events happened, but not where in the code. For that you sample. `perf record -g ./program` periodically interrupts the program and records the instruction pointer and call stack, then `perf report` shows which functions and lines took the most samples. Because sampling is statistical, a function that owns most samples is the hot path, and you can target it directly instead of guessing.
+
+Flame graphs make this even clearer. Tools such as `FlameGraph` turn folded stacks into a chart where the width of each frame is the fraction of samples, so you can see at a glance whether time is in JSON parsing, compression, locking, or allocation. `perf annotate` goes one level deeper and shows the assembly with sample counts per instruction, which is how you learn whether a hot loop is limited by a specific instruction or by the accesses around it. Sampling has overhead and should be used in staging or on a canary, but it is the fastest way from I am slow to the function that is slow.
+
+## Top-down microarchitecture analysis
+
+Rather than guessing whether the front end or back end is the problem, Intel's top-down method classifies every cycle into four buckets: Retiring, the useful work actually completed; Frontend Bound, when the decoder or instruction cache cannot feed the back end; Backend Bound, when execution units wait for data or execution resources; and Bad Speculation, when the CPU discarded work after a misprediction. Linux `perf stat --topdown` approximates this split on supported CPUs.
+
+The value is that the buckets tell you which lever to pull. Frontend Bound suggests smaller or hotter code and fewer taken branches. Bad Speculation suggests predictable control flow or fewer indirect calls. Backend Bound splits further into memory-bound and core-bound, so you know whether to attack data layout or arithmetic throughput. A diagnosis that stops at low IPC becomes actionable once you can say the cycles are mostly backend memory-bound, so the fix is locality, not more parallelism.
+
+## Detecting false sharing with perf mem and perf c2c
+
+Some cache misses are not about locality but about contention. False sharing happens when two cores write different variables that happen to sit on the same cache line; each write invalidates the other core's copy, so the line bounces between caches and the program pays coherence traffic for data it never shared by intent. It looks like high cache-miss or bus traffic and appears as mysterious scaling cliffs where adding cores makes things slower.
+
+`perf mem record` samples memory accesses with their source, and `perf c2c` specifically reports cache-line contention between CPUs, naming the variables and offsets involved. Finding a hot cache line that two cores fight over is the smoking gun. The usual fix is to pad or align the contended variables to separate cache lines, or to give each core its own copy that is merged occasionally, which is exactly the per-thread counter pattern from the concurrency chapter.
+
+## Definitions
+
+### Hardware performance counters
 
 > Hardware performance counters are processor-maintained measurements of events such as CPU cycles, retired instructions, branch misses, and cache misses. Engineers use them with timing and profiling data to investigate where a program spends its time.
 
-### What is IPC?
+### IPC
 
 > IPC, or instructions per cycle, is the number of retired instructions divided by the number of CPU cycles over a measured interval. It indicates how much instruction work the processor completed per cycle, but it does not identify the bottleneck by itself.
 
-### Why is clock frequency not enough to compare performance?
+### Why clock speed is not enough
 
 > Frequency tells us how many cycles occur per second, but not how much useful work completes in each cycle. Instruction dependencies, branch prediction, memory behavior, execution resources, and microarchitecture also determine performance.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### How would you investigate a CPU slowdown?
+### How to investigate a slowdown
 
 > I would establish a reproducible baseline, measure elapsed and CPU time, compare retired instructions and cycles, calculate IPC, and then use branch and memory-related counters to test specific hypotheses. I would also inspect the generated code and repeat the measurement under equivalent conditions.
 
-### Does a cache miss always stall the CPU?
+### Does a cache miss always stall
 
 > No. The miss may be served by another cache, overlap with independent instructions, or be hidden by out-of-order execution. It matters most when it is on the critical dependency path or occurs frequently enough to consume memory-system capacity.
 
-### Why can a version with lower IPC still be faster?
+### Lower IPC but still faster
 
 > IPC is only work completed per cycle. A version can have lower IPC but execute substantially fewer instructions, resulting in fewer total cycles and lower runtime.
 
 ## Common misconceptions
 
-**“More IPC is always better.”** Higher IPC can be good, but executing fewer total instructions may be a larger improvement. IPC must be considered with instruction count and total cycles.
+**"More IPC is always better."** Higher IPC can be good, but executing fewer total instructions may be a larger improvement. IPC must be considered with instruction count and total cycles.
 
-**“A cache miss counter directly gives the time lost to cache misses.”** It reports an event according to the processor's definition. Misses can overlap, have different service costs, and affect only some instructions.
+**"A cache miss counter directly gives the time lost to cache misses."** It reports an event according to the processor's definition. Misses can overlap, have different service costs, and affect only some instructions.
 
-**“One benchmark run proves the optimization works.”** One run cannot separate the change from frequency variation, background work, cache state, scheduling, or measurement noise.
+**"One benchmark run proves the optimization works."** One run cannot separate the change from frequency variation, background work, cache state, scheduling, or measurement noise.
 
-**“CPU utilization tells you whether the CPU is the bottleneck.”** High utilization suggests the process is using available CPU time, but it does not identify whether the code is efficiently using the CPU. Low utilization may still coexist with latency caused by one busy core or waiting on another resource.
+**"CPU utilization tells you whether the CPU is the bottleneck."** High utilization suggests the process is using available CPU time, but it does not identify whether the code is efficiently using the CPU. Low utilization may still coexist with latency caused by one busy core or waiting on another resource.
 
-**“The compiler output is stable because the source code is unchanged.”** Compiler version, flags, target CPU options, link-time optimization, libraries, and profile information can all change generated instructions.
+**"The compiler output is stable because the source code is unchanged."** Compiler version, flags, target CPU options, link-time optimization, libraries, and profile information can all change generated instructions.
 
-**“Hardware counters are exact and universal.”** Event definitions, availability, skid, multiplexing, virtualization, and kernel support vary by processor and environment. Treat counter output as evidence with a measurement context.
+**"Hardware counters are exact and universal."** Event definitions, availability, skid, multiplexing, virtualization, and kernel support vary by processor and environment. Treat counter output as evidence with a measurement context.
 
 ## Summary
 
 CPU performance is not explained by clock speed alone. A useful first model is instruction count, cycles per instruction, and effective frequency. Hardware counters help connect that model to reality by showing how much work retired, how many cycles were spent, and which events may be contributing to stalls.
 
 The disciplined approach is to measure before changing code, form a specific hypothesis about where time goes, select counters that can test it, look at the generated instructions, and repeat the experiment. Counters do not replace understanding; they make your explanation testable.
-
-## If you want to build this later
-
-Build a **microbenchmark and counter report tool**. It should run several small workloads, measure wall-clock time, and invoke or document the relevant `perf stat` commands. For each workload, report instructions, cycles, IPC, branches, branch misses, and cache events when available.
-
-Then write a short report answering three questions for every workload: what was the limiting factor, what evidence supports that conclusion, and what measurement could still prove you wrong? That final question is important. Good performance engineering is not finding a counter that agrees with your first guess; it is reducing uncertainty until the bottleneck is clear.

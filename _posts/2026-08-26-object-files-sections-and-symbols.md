@@ -5,26 +5,16 @@ date: 2026-08-26
 categories: ["System Engineering"]
 tags: [object-files, elf, symbols, relocations, dwarf]
 series: "System Engineering"
-stage: "Stage 4 — From Source Code to Execution"
+stage: "Stage 4 - From Source Code to Execution"
 stage_order: 4
 series_order: 3
 ---
 
-> Stage 4 — From Source Code to Execution  
-> Subject area 4.2 — Linking and Loading  
-> Article 3
-
-## The short version
+The previous chapter showed how a call becomes registers and a stack frame. This chapter shows where those instructions live after code generation. It is the third article of Stage 4.
 
 An object file is the compiler's output for one package. It holds machine code and data that are not yet runnable, together with tables that describe where things are and what still needs to be fixed.
 
 The code and data are organized into sections. `.text` holds executable instructions, `.rodata` holds string constants and other read-only data, `.data` holds initialized writable data, and `.bss` reserves space for zero-initialized data that takes no place in the file. A symbol table records names like `main.main` or `os.ReadFile`, whether they are defined here or needed from elsewhere, and whether they are visible outside this file. Relocations are notes that say an instruction refers to a symbol whose final address is not yet known and must be patched during linking. Debug symbols in DWARF record how to map those addresses back to Go source lines and types.
-
-## Where this article fits
-
-The previous article showed how a call becomes registers and a stack frame. This article shows where those instructions live after code generation.
-
-You need this before linking, because linking is the step that resolves symbols and applies relocations across many object files. You also need it before executable formats, because an executable is built by collecting sections from object files into segments the loader can map. The same tiny program that was compiled in the pipeline article will now be inspected as an object file.
 
 ## Why an object file is not a program
 
@@ -86,7 +76,7 @@ A symbol table lets the linker connect objects. DWARF lets a human connect the f
 
 ## Seeing sections and symbols with Go
 
-You can inspect the same tiny program at the object level without any extra setup beyond the Go toolchain and standard Linux tools. The following sequence is a Level 1 read.
+You can inspect the same tiny program at the object level without any extra setup beyond the Go toolchain and standard Linux tools.
 
 ```bash
 go build -o tiny main.go
@@ -115,7 +105,7 @@ readelf --relocs /tmp/main.o 2>&1 | head -n 40
 
 The relocation entries show where the compiler left holes that the linker later fixed. Each line names the offset, the relocation type, and the symbol.
 
-A Level 2 exercise shows why debug information matters.
+A second exercise shows why debug information matters.
 
 ```bash
 go build -o tiny.withdbg main.go
@@ -138,68 +128,56 @@ The problem was not the code. It was the artifact. The object files had been pro
 
 The team changed the build to keep both artifacts. The deployment used the stripped binary, while the build stored an unstripped copy with the same git hash. When an alert arrived, they ran `addr2line` or loaded the unstripped file into the debugger, and the same addresses now pointed to `main.go` lines that showed which `os.ReadFile` call had returned the error. The file size saving remained, but observability was restored because the data that describes the program was not discarded.
 
-## How experienced engineers use this
+## How engineers actually use this
 
 They do not look at sections to admire the file. They look when a reference cannot be resolved, when a string they expect is not where they thought, or when a profile is missing names. If `nm` does not show a symbol they expect, it may be local, inlined away, or stripped. If `readelf --relocs` shows a relocation for a name that remains undefined after linking, the build did not include the object that defines it. If a debugger shows the wrong line, they compare `objdump` with the DWARF line table instead of assuming the source is wrong.
 
-## Interview definitions
+## Definitions
 
-### What is an object file?
+### An object file
 
 > A file the compiler produces for one package that holds code and data in sections, a table of symbols, relocations that say where addresses must be fixed, and debug information. It is not runnable until it is linked.
 
-### What are `.text`, `.rodata`, `.data`, and `.bss`?
+### The main sections
 
 > `.text` holds executable instructions. `.rodata` holds read-only constants like string literals. `.data` holds writable data that starts with a specific value. `.bss` reserves zero-initialized writable space without storing those zeros in the file.
 
-### What is a symbol table?
+### A symbol table
 
 > A table that records each name, whether it is defined here or needed from elsewhere, whether it is visible outside this file, and where it lives and how large it is.
 
-### What is a relocation?
+### A relocation
 
 > A record that says at a given offset in a section, patch the bytes to refer to a symbol whose final address will only be known at link time, like the target of a call to another package.
 
-### What are debug symbols and DWARF?
+### Debug symbols and DWARF
 
 > Debug symbols record how to map an address back to a source file, line, type, and variable location. DWARF is the format that holds this on Linux, split into sections like `.debug_info` and `.debug_line`, and it is what lets a debugger show Go source while the CPU runs instructions.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### How do you tell whether a name is defined here or needed from elsewhere?
+### Defined here or needed elsewhere
 
 > In the symbol table or `nm` output an undefined symbol is marked with `U` and has no address in this file. A defined global symbol is marked with `T` for text or `D` for data and has an address. The linker must find a definition for every `U` that is actually used.
 
-### Why can `.bss` be large while the file stays small?
+### Why .bss keeps the file small
 
 > `.bss` describes memory that should be zeroed at startup. Storing millions of zeros in the file would waste space, so the file only records how many bytes are needed and the loader reserves the space when the program starts.
 
-### What happens if a relocation is not fixed?
+### What happens if a relocation is not fixed
 
 > The instruction would still contain a placeholder and would jump or load the wrong address. The linker is the step that writes the correct relative or absolute value, so an executable with unresolved relocations cannot be started correctly.
 
 ## Common misconceptions
 
-### “A symbol table is just a list of function names.”
+**"A symbol table is just a list of function names."** It also records visibility, size, and whether a name is defined or needed, and it is what the linker uses to decide if a reference can be resolved.
 
-It also records visibility, size, and whether a name is defined or needed, and it is what the linker uses to decide if a reference can be resolved.
+**"`.data` and `.bss` are the same."** `.data` stores bytes in the file for initialized data, while `.bss` only records how much zeroed space to reserve, which keeps the file smaller.
 
-### “`.data` and `.bss` are the same.”
+**"Debug symbols change whether the program runs."** They change whether tools can map an address back to source. The instructions and relocations are what decide whether the program can run. A stripped program still runs, but profiles and stack traces have fewer names.
 
-`.data` stores bytes in the file for initialized data, while `.bss` only records how much zeroed space to reserve, which keeps the file smaller.
-
-### “Debug symbols change whether the program runs.”
-
-They change whether tools can map an address back to source. The instructions and relocations are what decide whether the program can run. A stripped program still runs, but profiles and stack traces have fewer names.
-
-### “The compiler leaves no notes for the linker.”
-
-Relocations are those notes. They say exactly where to patch once the final layout is known.
+**"The compiler leaves no notes for the linker."** Relocations are those notes. They say exactly where to patch once the final layout is known.
 
 ## Summary
 
 Object files separate concerns. Sections keep code, read-only data, initialized data, and zeroed space distinct. The symbol table says which names are defined here and which are needed elsewhere. Relocations say where the final addresses must be written. Debug information records how to translate the result back to Go source. None of these run by themselves. They are what the linker will collect and patch to build the executable the loader can map.
-
-## If you want to build this later
-
-Build the tiny program with `go build -o tiny main.go` and record `readelf -S tiny`, `nm tiny`, and `size tiny`. Then build the package as an object with `go tool compile -S -o /tmp/main.o main.go` and run `readelf --relocs /tmp/main.o` to note which symbols were still undefined. Rebuild with `go build -ldflags="-s -w"` and compare the section list and the `nm` output. For each of `main.main`, a string literal, and a `var` you add, write down which section it lives in, whether its symbol is local or global, and whether any relocation refers to it. Keep the unstripped file for `addr2line` and note what is lost when it is stripped.

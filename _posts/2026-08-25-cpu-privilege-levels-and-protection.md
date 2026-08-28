@@ -5,30 +5,18 @@ date: 2026-08-25
 categories: ["System Engineering"]
 tags: [privilege, protection-rings, memory-protection, syscalls, secure-boot]
 series: "System Engineering"
-stage: "Stage 3 — Hardware and Computer Architecture"
+stage: "Stage 3 - Hardware and Computer Architecture"
 stage_order: 3
 series_order: 6
 ---
 
-> Stage 3 — Hardware and Computer Architecture  
-> Subject area 3.3 — Privilege and Protection  
-> Article 6
-
-## The short version
+The previous chapter described how control moves to the kernel through interrupts and traps. This chapter explains why that move is safe. It is the sixth and final chapter of Stage 3.
 
 A modern CPU runs in at least two modes. The ordinary mode is for user programs, the privileged mode is for the kernel. In user mode you can do arithmetic and touch your own memory, but you cannot change page tables, disable interrupts, or program a device. Only the kernel can. The hardware enforces this, and it only allows transitions through gates it controls.
 
 A useful way to think about it is that user mode can ask and kernel mode can do. Protection rings on x86-64 and exception levels on ARM64 are just names for these modes, and bits in each page table entry decide whether a page can be read, written, or executed by user code. Every system call, interrupt, and fault goes through a gate where the kernel validates the request. Hardware features like Secure Boot, the IOMMU, and extra memory protections build on this same boundary.
 
 For a backend, this boundary is the reason `mmap` with the wrong protection fails with `SIGSEGV`, why a container with `seccomp` can block `mprotect`, and why your service cannot bypass the kernel to talk directly to a disk.
-
-## Where this article fits
-
-The last article described how control moves to the kernel through interrupts and traps. This article explains why that move is safe.
-
-You need this after interrupts, because an interrupt is the moment when privilege changes, and after system calls, because a system call is the intentional trap that asks for privilege. What comes next is how source code becomes an executable that contains a `syscall` instruction and pages that start with particular permissions.
-
-This ties the earlier chain together. A user request becomes a trap, the trap is checked at a hardware gate, the kernel validates it, and only then can a device be programmed through DMA.
 
 ## Why privilege is needed
 
@@ -162,74 +150,88 @@ The first reaction was to disable the filter. That would have worked, but it wou
 
 The lesson was not that protection is slow. The extra `mprotect` is cheap. The lesson was that when `mmap` succeeds but `mprotect` or an access fails, the layer that rejected you is the privilege boundary, and the correct fix is to follow its rules instead of disabling them.
 
-## How experienced engineers think about privilege
+## How engineers actually think about privilege
 
 When a call fails with `EPERM`, `EFAULT`, or `SIGSEGV`, they check future possibilities before blaming logic. They look at `errno`, at the mapping in `/proc/<pid>/maps`, and at `CapEff` and `Seccomp` in `/proc/<pid>/status`. They run `strace` to see whether a `syscall` was rejected at the gate or whether the error happened after. They check `dmesg` for IOMMU messages when DMA is involved, and for a production service they check whether Secure Boot or TPM attestation is part of how the peer proves its identity.
 
 The habit is to ask which level said no. A page permission fault, a `seccomp` filter, and a normal permission check all look similar at first, but they are enforced by different layers and have different fixes.
 
-## Interview definitions
+## SMEP, SMAP, PXN, and PAN: keeping the kernel away from user memory
 
-### What are privilege levels?
+Privilege does not only protect user code from the kernel. Recent CPUs add protections that stop the kernel from carelessly touching user memory. SMEP, supervisor-mode execution prevention, marks user pages as non-executable even when the CPU is in kernel mode, so a kernel bug or exploit cannot jump into shellcode placed in user memory. SMAP, supervisor-mode access prevention, similarly blocks the kernel from reading or writing user pages unless it explicitly opens a window with a special instruction. On ARM these are PXN, privileged execute never, and PAN, privileged access never.
+
+These matter because many kernel exploits work by getting the kernel to dereference an attacker-controlled user pointer as code or data. With these bits on, that path faults by hardware, not by convention, which is why `dmesg` shows `SMEP` and `SMAP` enabled as a line item in a security audit. They are the per-access complement to the page-table permission bits: the same page that is writable by the user is now also off-limits to the kernel unless the kernel asks for it on purpose.
+
+## Linux capabilities: fine-grained privilege without root
+
+On Linux, `root` is not one switch. Privilege is split into about forty capabilities, each granting one class of operation. `CAP_NET_BIND_SERVICE` lets a process bind a port below 1024, `CAP_SYS_ADMIN` covers a broad set of administrative actions, `CAP_SYS_PTRACE` allows debugging other processes, and so on. A program can drop every capability it does not need, keeping only the few it must have.
+
+This is why the article's distinction between `root` and the privilege boundary matters. A container running as `root` may still have an empty capability set, so it cannot, for example, load a kernel module or change the system clock, while a non-root process granted `CAP_NET_BIND_SERVICE` can bind port 80 without being root at all. `CapEff` in `/proc/<pid>/status` shows the effective set. The engineering practice is least privilege: grant exactly the capabilities a service needs and drop the rest at startup, which shrinks what a compromise could do.
+
+## seccomp-bpf: shrinking the syscall surface
+
+A process under Linux can install a seccomp filter, a tiny program written in BPF, that inspects each syscall number and arguments and decides allow, deny, or trap. The common case is the default-deny profile used by containers and runtimes: only a small allowlist of syscalls is permitted, and anything else returns `EPERM`. This is exactly the mechanism that blocked the `mprotect` with execute permission in the production example: the filter did not know about the service's JIT, so it rejected the call at the gate.
+
+The value is attack-surface reduction. Even if an attacker gains code execution inside a process, they can only invoke the syscalls the filter permits, which often removes the ones needed for further escape. `seccomp` is the deepest layer shown here, below capabilities and below page permissions, because it is checked at the syscall gate before the kernel validates arguments. Combined with dropping capabilities and running unprivileged, it is the core of container sandboxing.
+
+## The kernel lives in your address space: KPTI and PCID
+
+A convenient detail of Linux is that the kernel is mapped into the top of every process's virtual address space. A `syscall` therefore changes privilege level but usually does not switch page tables, because the kernel's code and data are already present, just marked inaccessible to user mode. This keeps system calls cheap: no full page-table reload on every call.
+
+Two refinements modify this. The first is KPTI, kernel page-table isolation, added to defend against Meltdown-class attacks that let user code read kernel memory through speculative execution. KPTI keeps a separate kernel page table and switches to it on entry, so the kernel mapping is not present in user mode at all, at the cost of an extra TLB flush on every crossing. The second is PCID on x86 or ASID on ARM, a tag that lets the TLB keep entries for both address spaces so switching does not invalidate everything. Both are reminders that the privilege gate and the page tables are linked: the same transition that the syscall article described as a mode switch is also, depending on the mitigation, a possible page-table switch.
+
+## Definitions
+
+### Privilege levels
 
 > Hardware modes that separate user code, which is restricted, from kernel code, which is privileged. On x86 user code runs in ring 3 and the kernel in ring 0, on ARM in EL0 and EL1, and transitions are only allowed through gates like `syscall`.
 
-### What is user mode versus kernel mode?
+### User mode versus kernel mode
 
 > User mode runs ordinary code with access only to its own virtual pages. Kernel mode can manage page tables, program devices, and touch other processes' state. A user thread must trap to do privileged work. If it tries directly, the access faults.
 
-### What is memory protection?
+### Memory protection
 
 > Each page has permission bits that are checked on every access, such as readable, writable, executable, and user accessible. If user code tries to break them, the access faults and the kernel delivers `SIGSEGV`. This is how the system enforces `W^X` and keeps one process from reading another's memory.
 
-### What is a controlled transition?
+### Controlled transitions
 
 > The only legal way to enter privileged mode. User code runs `syscall` or `svc`, the CPU looks up the handler in the IDT or vector table, switches to the kernel stack, and the kernel validates the number, pointers, and credentials before dispatching.
 
-### What is Secure Boot?
+### Secure Boot
 
 > A hardware-rooted chain that checks each boot stage's signature before that stage is given privilege. Firmware checks the bootloader, the bootloader checks the kernel, and the chain starts from a key in hardware.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### Why can user code not change page tables?
+### Why user code cannot change page tables
 
 > The page table decides which physical page a virtual address maps to. If user code could write the table, it could map any physical page, including kernel memory, and break isolation. Only privileged mode may write the table base register.
 
-### What does `NX` or `W^X` enforce?
+### What NX and W^X enforce
 
 > `NX` marks a page as not executable, so trying to run code there faults. `W^X` is the rule that a page should not be both writable and executable at once, which stops an attacker from writing shellcode and then running it.
 
-### How does the kernel safely read user pointers?
+### How the kernel reads user pointers safely
 
 > It checks that the range is inside user space, verifies the user-accessible bit, and then copies with a helper like `copy_from_user` that handles the case where the user thread changes the memory during the check.
 
-### What does the IOMMU do?
+### What the IOMMU does
 
 > It gives I/O devices their own page tables, so DMA is limited to the pages the kernel mapped for that device. Without it, a device could overwrite any RAM, including kernel memory.
 
 ## Common misconceptions
 
-### “Kernel space is just a folder.”
+**"Kernel space is just a folder."** It is a privilege mode enforced by hardware. Directories like `/boot` have nothing to do with it. One is about files, the other is about which instructions the CPU will allow.
 
-It is a privilege mode enforced by hardware. Directories like `/boot` have nothing to do with it. One is about files, the other is about which instructions the CPU will allow.
+**"More privilege is always faster."** Entering the kernel is slower because the CPU must switch mode, save state, and validate. Privilege is for protection, not speed. If you cross it often, batch system calls or use `io_uring` to reduce trips.
 
-### “More privilege is always faster.”
+**"If I am root, privilege does not matter."** `root` is a software identity. Even as `root`, user code still runs in user mode until it traps. Container `root` can still be blocked by `seccomp`, capabilities, and page protections.
 
-Entering the kernel is slower because the CPU must switch mode, save state, and validate. Privilege is for protection, not speed. If you cross it often, batch system calls or use `io_uring` to reduce trips.
-
-### “If I am root, privilege does not matter.”
-
-`root` is a software identity. Even as `root`, user code still runs in user mode until it traps. Container `root` can still be blocked by `seccomp`, capabilities, and page protections.
-
-### “Secure Boot is just for laptops.”
-
-Cloud VMs and containers use measured boot to seal keys and attest which kernel booted. That attestation is how you know the kernel that gained privilege is the one you expected.
+**"Secure Boot is just for laptops."** Cloud VMs and containers use measured boot to seal keys and attest which kernel booted. That attestation is how you know the kernel that gained privilege is the one you expected.
 
 ## Summary
 
 Privilege levels are the hardware reason the operating system can actually enforce isolation. User code asks through traps, the CPU only allows entry through gates, each page carries its own permission bits, and features like IOMMU and Secure Boot extend the same idea beyond the basic rings. For a backend, the difference between `EPERM`, `EFAULT`, and `SIGSEGV`, or between `mmap` succeeding and `mprotect` failing, is the sound of this boundary doing its job.
 
-## If you want to build this later
-
-Extend the inspection tool you built earlier. Make it parse `CapEff`, `Seccomp`, and the permission column of `/proc/self/maps`, and print the protection reported in `dmesg`. Then write a small C program that maps a page readable and tries to write it to see `SIGSEGV`, and another that does a correct write-then-execute JIT transition with two `mprotect` steps. Run the same binary under `seccomp` with `prctl` and note which layer rejected each attempt, from the page bit to the kernel filter.
+With this chapter, Stage 3 ends. We moved from how a single instruction is executed, through the counters that measure it, the caches and memory ordering that sit underneath it, and the device interrupts and privilege gates that let it talk to the rest of the machine safely. The next stage looks at how that source code becomes an executable in the first place.

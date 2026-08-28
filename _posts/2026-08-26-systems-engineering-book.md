@@ -68,8 +68,7 @@ mermaid: true
 - Chapter 32 — Queues, Pipelines, Backpressure, and Cancellation
 
 **Epilogue** — Where the chain goes next (Stages 6–18 preview, not yet included)  
-**Appendix A** — Glossary  
-**Appendix B** — Progressive Projects Mapped to Parts
+**Appendix A** — Glossary
 
 ---
 
@@ -97,11 +96,11 @@ Production reliability and system design
 
 Each chapter answers: what problem it solves, what interface it exposes, what happens inside during normal operation, what happens when it fails or is slow, how to see it, and what tradeoff it forces. The goal is not to memorize facts, but to be able to explain a failure with evidence, to choose a design with known costs, and to discuss it clearly in an interview or a design review.
 
-The blogs that became this book each had `The short version` and `Where this article fits` for web navigation. The book removes that blog chrome and replaces it with part introductions and bridges that carry the same running examples forward. Code is kept at three levels: read it to see the idea, explain it to see the boundary, and build it later when you have a longer break. The book itself is complete without running any code, but every example can be run locally.
+The blogs that became this book each had `The short version` and `Where this article fits` for web navigation. The book removes that blog chrome and replaces it with part introductions and chapter bridges that carry the same running example forward. Every chapter now contains one substantial, runnable program built around the same `tiny` example, so the idea, the boundary, and a working implementation travel together. The book itself is complete without running any code, but every example can be run locally.
 
 ## How to Use This Book
 
-If you have limited practice time, read the book itself during short periods. Each chapter has a production story and interview definitions you can use directly. Code at Level 1 is the smallest command that makes the idea concrete — `strace`, `ps`, `objdump`, `perf stat` — and can be understood without setup. Level 2 is a short annotated snippet that shows the boundary. Level 3 is an optional project at the end of each part that combines the ideas and is intentionally deferred to a break.
+If you have limited practice time, read the book itself during short periods. Each chapter has a production story and interview definitions you can use directly. Code in every chapter is a single substantial program built around `tiny` — a command-line reader you can build, run, and extend — so the idea and a working implementation travel together. Chapters also use `strace`, `ps`, `objdump`, `perf stat`, and `readelf` to make the boundary concrete; those commands are explained where they first appear.
 
 The recommended order is the order of the parts. Stage 0 on professional engineering is deferred to an appendix until you have the technical chain, then revisited before interviews.
 
@@ -109,9 +108,7 @@ The recommended order is the order of the parts. Stage 0 on professional enginee
 
 # Part I — Systems Programming Foundations
 
-Stage 1 gives you the vocabulary the rest of the book reuses: resources, ownership, limits, failure, determinism, performance, portability, and the language you choose to express them. The extra chapter on performance constraints is a bridge that was not in the original roadmap but belongs here, because performance is a constraint before it is an optimization.
-
-The tiny command-line program that will follow you through the book is introduced here. It reads a file whose path is in an environment variable and prints it. It looks trivial, but it already touches every idea in this part.
+`tiny` begins here as a single Go source file: it reads the file named by the `TINY_FILE` environment variable (default `message.txt`) and prints its contents. Over the next eight chapters that one source file becomes the lens for every idea in Stage 1. Chapter 1 defines what systems programming means using `tiny`'s source as the example; Chapter 2 measures the CPU, memory, storage, and network resources `tiny` consumes; Chapter 3 makes `tiny`'s file-descriptor ownership and lifecycle explicit; Chapter 4 adds failure, timeout, and idempotency handling; Chapter 5 benchmarks `tiny`'s streaming versus batched reads; Chapter 6 gives `tiny` a portable binary record format; Chapter 7 rewrites `tiny` in C; and Chapter 8 reimplements the record reader in Rust and Zig to compare ownership models. By the end of Part I, `tiny` is no longer a trivial snippet — it is a concrete carrier for resources, ownership, limits, failure, performance, portability, and language choice.
 
 ```go
 package main
@@ -131,8 +128,9 @@ func main() {
 
 ---
 
-
 ## Chapter 1 — What Systems Programming Means
+
+`tiny` was introduced in the Part I opening as a single Go source file that reads `TINY_FILE` and prints it. This chapter uses that source to define what systems programming means: the responsibility for resources and behavior that a trivial-looking program already carries, even before it is compiled or run.
 
 ## Application programming and systems programming
 
@@ -365,9 +363,19 @@ The dotted path is the important lesson. Hidden layers still influence visible b
 
 ## A small code example: convenience versus control
 
-The following Go program uses a high-level file API. It does not directly manipulate a disk or issue raw device commands. The operating system still manages the file descriptor, permissions, page cache, and storage interaction underneath it.
+The following Go program is `tiny` itself. It uses a high-level file API and does not directly manipulate a disk or issue raw device commands. The operating system still manages the file descriptor, permissions, page cache, and storage interaction underneath it — and the comments name exactly which resources the call touches.
 
 ```go
+// tiny reads the file named by the TINY_FILE environment variable
+// (defaulting to "message.txt") and prints its contents.
+//
+// Even this trivial program touches several resources:
+//   - CPU:           the Go runtime and process consume processor time to run main.
+//   - file descriptor: os.ReadFile opens a descriptor for the file (often fd 3).
+//   - syscall:       the read is performed by the kernel via open/read/close syscalls.
+//   - page cache:    the kernel usually caches the file's bytes in the page cache.
+//   - memory:        the file contents are copied into a heap buffer before printing.
+// Chapter 2 measures these costs; later chapters make ownership and failure explicit.
 package main
 
 import (
@@ -376,12 +384,18 @@ import (
 )
 
 func main() {
-	data, err := os.ReadFile("message.txt")
-	if err != nil {
-		fmt.Printf("read message.txt: %v\n", err)
-		return
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
 	}
 
+	// os.ReadFile opens the file, reads it fully into memory, and closes the
+	// descriptor. The descriptor and the syscall are owned by the call.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
+		os.Exit(1)
+	}
 	fmt.Print(string(data))
 }
 ```
@@ -467,15 +481,11 @@ Systems programming is about building software that manages resources and provid
 
 The central systems-engineering habit is to connect a high-level operation to the resources and boundaries underneath it. When a program reads a file, sends a request, creates a thread, or writes to a database, ask what the operation consumes, who owns that resource, what can block or fail, and how the behavior can be observed.
 
-## If you want to build this later
-
-Build a small resource-inspection command-line tool. It can start with a command that reads a file and reports its size, then grow to show the process's open file descriptors, memory usage, CPU time, and network connections.
-
-The purpose is not to build a complete replacement for operating-system tools. It is to connect a high-level program to the resources it uses and gradually make those resources visible. Later articles about processes, memory, files, and networking can extend the same project.
+**Where this leaves us** — `tiny` now exists only as source, but we have already seen that even `os.ReadFile` hides CPU time, a file descriptor, a syscall, and the page cache. Chapter 2 makes those hidden costs measurable by instrumenting `tiny` to report the resources it actually consumes.
 
 ## Chapter 2 — CPU, Memory, Storage, and Network Resources
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 1 treated `tiny` as source and argued that every operation costs a resource. This chapter names those resources concretely — CPU, memory, storage, and network — and shows how to measure what `tiny` spends on each, including a network variant that reveals the cost of connection state.
 
 ## What is a resource?
 
@@ -759,6 +769,104 @@ For example, high CPU does not prove that inefficient computation is the root ca
 
 The tool is only useful when paired with a question.
 
+## A runnable tiny example: instrumenting resources
+
+The program below is `tiny` extended into an instrumented reader. It reports elapsed wall-clock time, user/sys CPU time (via `syscall.Getrusage`), peak resident set size (from `rusage.Maxrss`), and bytes read. A `-url` flag switches it into a network variant so the cost of a connection and a remote fetch becomes visible alongside the local file read.
+
+```go
+package main
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"runtime"
+	"syscall"
+	"time"
+)
+
+// reportRusage prints user + system CPU time and peak resident set size for the
+// current process. On Linux, syscall.Rusage.Maxrss is reported in kilobytes.
+func reportRusage(label string) {
+	var r syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &r); err != nil {
+		fmt.Fprintf(os.Stderr, "getrusage: %v\n", err)
+		return
+	}
+	userMS := r.Utime.Sec*1000 + r.Utime.Usec/1000
+	sysMS := r.Stime.Sec*1000 + r.Stime.Usec/1000
+	fmt.Printf("  [%s] user_cpu=%.3fs sys_cpu=%.3fs peak_rss=%dkB\n",
+		label, float64(userMS)/1000, float64(sysMS)/1000, r.Maxrss)
+}
+
+// readLocal reads TINY_FILE (or -file) and reports the storage + CPU resources.
+func readLocal(path string) (int64, error) {
+	start := time.Now()
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	n, err := io.Copy(os.Stdout, f)
+	elapsed := time.Since(start)
+	fmt.Printf("local read of %s:\n", path)
+	fmt.Printf("  bytes=%d elapsed=%s throughput=%.2f MB/s\n",
+		n, elapsed, float64(n)/(1024*1024)/elapsed.Seconds())
+	reportRusage("local")
+	return n, err
+}
+
+// fetchRemote performs a network fetch to show the network resource: a socket,
+// kernel buffers, connection state, and a remote service's CPU/time.
+func fetchRemote(url string) (int64, error) {
+	start := time.Now()
+	resp, err := http.Get(url)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("unexpected status %s", resp.Status)
+	}
+	n, err := io.Copy(io.Discard, resp.Body)
+	elapsed := time.Since(start)
+	fmt.Printf("remote fetch of %s:\n", url)
+	fmt.Printf("  bytes=%d elapsed=%s throughput=%.2f MB/s\n",
+		n, elapsed, float64(n)/(1024*1024)/elapsed.Seconds())
+	reportRusage("remote")
+	return n, err
+}
+
+func main() {
+	path := flag.String("file", os.Getenv("TINY_FILE"), "file for tiny to read")
+	if *path == "" {
+		*path = "message.txt"
+	}
+	url := flag.String("url", "", "if set, also perform a network fetch to show network resource use")
+	flag.Parse()
+
+	if _, err := readLocal(*path); err != nil {
+		fmt.Fprintf(os.Stderr, "read %s: %v\n", *path, err)
+		os.Exit(1)
+	}
+
+	if *url != "" {
+		if _, err := fetchRemote(*url); err != nil {
+			fmt.Fprintf(os.Stderr, "fetch %s: %v\n", *url, err)
+			os.Exit(1)
+		}
+	}
+
+	// The Go runtime also accounts for heap memory separately from peak RSS.
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	fmt.Printf("go heap: alloc=%dkB total_alloc=%dkB\n", m.Alloc/1024, m.TotalAlloc/1024)
+}
+```
+
 ## Interview definitions
 
 ### What are the main resources a system manages?
@@ -845,17 +953,11 @@ Each resource has capacity, latency, throughput, limits, and failure modes. They
 
 The systems-engineering approach is to connect user-visible behavior to resource usage and waiting. Measure the bottleneck, understand the limit, choose an overload policy, and make the result observable. Do not optimize a resource merely because its number looks large; understand whether it is actually limiting the work.
 
-## If you want to build this later
-
-Build a small command-line resource observer that runs another program and records how it uses the machine.
-
-Start by recording elapsed time and exit status. Then add CPU time, maximum memory, output size, and the number of opened files. Later, run a program that reads a large file, performs CPU work, and makes a network request. Compare which resource changes when you modify the input size, file location, or number of concurrent requests.
-
-The goal is not to recreate `top` or build a perfect monitoring system. The goal is to connect an operation to the resources it consumes and learn to distinguish active work from waiting.
+**Where this leaves us** — With `tiny` instrumented, we can see elapsed time, user/sys CPU, peak RSS, and bytes read, plus the extra cost when it also performs a network fetch. Chapter 3 turns from measuring resources to owning them: it rewrites `tiny` to make file-descriptor ownership and lifecycle explicit, and shows what happens when that ownership is forgotten.
 
 ## Chapter 3 — Resource Ownership and Limits
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 2 showed `tiny` spending resources but said nothing about who releases them. This chapter makes descriptor ownership explicit with a `withFile` helper, then demonstrates the failure mode when ownership is forgotten and descriptors leak until the process hits its limit.
 
 ## What ownership means
 
@@ -1042,7 +1144,7 @@ A hard limit is enforced so that usage cannot pass it, or cannot pass it without
 
 A soft limit is a target, warning threshold, or preferred maximum. The system may continue beyond it, but the operator or component should take action before reaching a hard failure.
 
-Soft limits are useful for early warning. A service may alert when memory usage reaches 70 percent of its limit, leaving time to investigate before the operating system kills it. A queue may begin shedding low-priority work before it becomes completely full.
+Soft limits are useful for early warning. A service may alert when memory usage reaches 70 percent of its limit, leaving time to investigate before the operating system kills it. A queue may begin shedding lower-priority work before it becomes completely full.
 
 The exact meaning of “soft” depends on the system. Some operating systems expose configurable soft and hard resource limits. In application design, the terms are often used more generally to describe a warning threshold versus an enforced boundary.
 
@@ -1239,6 +1341,87 @@ When you encounter a resource in an unfamiliar system, ask these questions:
 
 These questions work for a file descriptor, a memory buffer, a database connection, a worker thread, a lock, a queue slot, or an external lease.
 
+## A runnable tiny example: explicit descriptor ownership
+
+The program below rewrites `tiny` so ownership is impossible to miss. `withFile` opens the descriptor, runs a function, and `defer`s the close so the owner always releases it. `leakyRead` deliberately forgets to close, and `main` opens many files in a loop, printing the live descriptor count from `/proc/self/fd` so exhaustion is visible.
+
+```go
+package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+)
+
+// withFile opens path, runs fn with the open *os.File, and guarantees the
+// descriptor is closed afterwards. withFile remains the owner; fn only borrows.
+func withFile(path string, fn func(*os.File) error) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close() // ownership released here, on every path out
+	return fn(f)
+}
+
+// leakyRead opens a descriptor and never closes it. Each call leaks one fd,
+// demonstrating the failure mode Chapter 2 could only describe.
+func leakyRead(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	// f is never closed: one descriptor leaks per call.
+	data, err := os.ReadFile(path)
+	_ = f
+	return data, err
+}
+
+// openFds counts the process's currently open descriptors via /proc/self/fd.
+func openFds() int {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1
+	}
+	return len(entries)
+}
+
+func main() {
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
+
+	// Correct ownership: withFile owns and closes the descriptor.
+	if err := withFile(path, func(f *os.File) error {
+		data, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		fmt.Print(string(data))
+		return nil
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "withFile: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "after withFile: open fds = %d\n", openFds())
+
+	// Deliberately leaky: each iteration opens a descriptor and never closes it.
+	const iterations = 2000
+	for i := 0; i < iterations; i++ {
+		if _, err := leakyRead(path); err != nil {
+			fmt.Fprintf(os.Stderr, "leakyRead stopped at %d: %v (open fds=%d)\n",
+				i, err, openFds())
+			os.Exit(1)
+		}
+		if i%500 == 0 {
+			fmt.Fprintf(os.Stderr, "iter %d: open fds = %d\n", i, openFds())
+		}
+	}
+}
+```
+
 ## Interview definitions
 
 ### What is resource ownership?
@@ -1321,17 +1504,11 @@ Resource limits protect systems from unbounded consumption. When a limit is reac
 
 The most important practical lesson is that limits and ownership solve different problems. Ownership prevents leaks and unclear lifetimes. Limits contain damage and control competition. A reliable system needs both, along with enough observability to show usage, waiting, leaks, and exhaustion before they become an outage.
 
-## If you want to build this later
-
-Extend the resource-observer project from the previous article into a bounded worker service.
-
-The service should accept jobs, process them with a fixed number of workers, and place waiting jobs in a bounded queue. When the queue is full, it should reject new jobs with a clear error. Add counters for accepted jobs, rejected jobs, queue length, processing time, and worker usage.
-
-Then introduce a controlled leak by preventing one code path from returning a resource or finishing a job. Observe how usage changes, how the limit is reached, and whether the service rejects work safely. Restore the cleanup path and add a test that prevents the leak from returning.
+**Where this leaves us** — `tiny` now opens and closes its descriptor through an explicit owner, and we have seen that forgetting to close exhausts the process at its descriptor limit. Chapter 4 adds the failure behavior around that read: a context deadline, bounded retries with backoff and jitter, an idempotency key, and graceful cancellation when the work is no longer needed.
 
 ## Chapter 4 — Failure, Determinism, and Control
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 3 gave `tiny` a clear descriptor owner; this chapter wraps the read in a context deadline and a bounded retry so a slow or failing read cannot hang the process. The new facet is idempotency: a read-only retry is safe, but a state-changing retry must carry a key so it is not performed twice.
 
 ## Failure is a normal system state
 
@@ -1423,19 +1600,19 @@ An operation is idempotent when applying it more than once produces the same fin
 
 Setting a user's email address to a specific value is naturally close to idempotent. Sending a payment request or incrementing a counter is not. Repeating a payment or increment can apply the effect more than once.
 
-A common way to make a request idempotent is to give it a unique idempotency key. The server stores the reasult associated with that key. If the same key arrives again, the server returns the recorded result instead of performing the operation again.
+A common way to make a request idempotent is to give it a unique idempotency key. The server stores the result associated with that key. If the same key arrives again, the server returns the recorded result instead of performing the operation again.
 
 ```text
 Client creates request ID: payment-8f31
-        ↓
+         ↓
 Server receives payment-8f31
-        ↓
+         ↓
 Server records the request and performs the payment
-        ↓
+         ↓
 Response is lost
-        ↓
+         ↓
 Client retries payment-8f31
-        ↓
+         ↓
 Server finds the existing result and returns it
 ```
 
@@ -1677,6 +1854,120 @@ They may ask:
 
 The goal is not to sound cautious. It is to avoid making a recovery action that creates a second failure, such as retrying a non-idempotent operation, increasing a limit until a downstream system collapses, or deleting state that is still needed for recovery.
 
+## A runnable tiny example: deadline, retry, idempotency, cancellation
+
+The program below keeps `tiny`'s read but wraps it in a `context` deadline and a bounded retry with exponential backoff and jitter. A `readFileContext` helper stops work when the context is cancelled instead of blocking forever. The retry carries an idempotency key; `unsafeStateChangingRetry` shows in comments why a state-changing operation must not be retried naively. A second context demonstrates graceful cancellation that stops further work.
+
+```go
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"math/rand"
+	"os"
+	"time"
+)
+
+// newIDempotencyKey returns a unique key for a "re-fetch" so repeating the same
+// logical operation is recognized by the server and not performed twice.
+func newIDempotencyKey() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "key-unknown"
+	}
+	return hex.EncodeToString(b)
+}
+
+// readFileContext reads TINY_FILE but stops if ctx is cancelled or its deadline
+// passes, so a slow/blocked read cannot hang the process.
+func readFileContext(ctx context.Context, path string) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		data, err := os.ReadFile(path)
+		ch <- result{data, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.data, r.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("read cancelled: %w", ctx.Err())
+	}
+}
+
+// fetchWithRetry performs a READ-ONLY re-fetch with bounded retries, exponential
+// backoff, and jitter. Reading is safe to retry: it changes no state.
+func fetchWithRetry(ctx context.Context, path, key string) ([]byte, error) {
+	const maxAttempts = 5
+	delay := 50 * time.Millisecond
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			delay *= 2
+			jitter := time.Duration(float64(delay) * (rand.Float64() * 0.5))
+			select {
+			case <-time.After(delay + jitter):
+			case <-ctx.Done():
+				return nil, fmt.Errorf("retry backing off: %w", ctx.Err())
+			}
+		}
+		data, err := readFileContext(ctx, path)
+		if err == nil {
+			fmt.Printf("  attempt %d ok (idempotency key=%s)\n", attempt+1, key)
+			return data, nil
+		}
+		fmt.Printf("  attempt %d failed: %v\n", attempt+1, err)
+	}
+	return nil, fmt.Errorf("gave up after %d attempts", maxAttempts)
+}
+
+// unsafeStateChangingRetry shows WHY a state-changing operation must not be
+// retried naively: each attempt would charge or increment again.
+func unsafeStateChangingRetry(key string) {
+	// Imagine this POSTs a payment. Retrying without the server remembering the
+	// key would create a duplicate charge. We only document the danger here.
+	fmt.Printf("  (skipping unsafe retry) state-changing op must be idempotent; key=%s\n", key)
+}
+
+func main() {
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
+
+	// Deadline-bound work with bounded, idempotent retry.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	key := newIDempotencyKey()
+	fmt.Printf("reading %s with deadline and bounded retry...\n", path)
+	data, err := fetchWithRetry(ctx, path, key)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	fmt.Print(string(data))
+	unsafeStateChangingRetry(key)
+
+	// Graceful cancellation: cancel the context and stop further work.
+	cancelCtx, stop := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		stop() // user closed page / upstream gave up
+	}()
+	select {
+	case <-cancelCtx.Done():
+		fmt.Fprintf(os.Stderr, "\ncancellation received: stopped further work\n")
+	case <-time.After(time.Second):
+	}
+}
+```
+
 ## Interview definitions
 
 ### What is failure handling in systems?
@@ -1759,17 +2050,11 @@ Determinism makes behavior easier to test and debug, but systems naturally conta
 
 Higher-level abstractions reduce the amount of detail engineers must manage. Taking more direct control can improve predictability or performance, but it also creates responsibility for cleanup, synchronization, portability, security, and maintenance. The right choice is the simplest abstraction that satisfies the real requirements.
 
-## If you want to build this later
-
-Build a small report-generation worker that can survive failure and safe retries.
-
-The worker should accept a job ID, create a report file, and store the job state as it moves through stages such as `accepted`, `running`, `uploaded`, and `completed`. Add deadlines, temporary-file cleanup, controlled retries, and idempotent handling when the same job ID is submitted twice.
-
-Then simulate failures at each stage: stop the worker during file creation, make the upload fail, drop the final response, and submit the same job twice. The goal is to make the worker distinguish “definitely not completed,” “completed but response lost,” and “state is uncertain.”
+**Where this leaves us** — `tiny` now fails predictably: it stops on cancellation, retries reads with backoff and jitter, and would only repeat a state-changing op behind an idempotency key. Chapter 5 measures how fast `tiny` actually is, comparing streaming and batched ways to read its file and reporting throughput and p95 latency.
 
 ## Chapter 5 — Performance Constraints in Systems
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 4 made `tiny` robust; this chapter measures its performance, comparing a streaming buffered read with a batched whole-file read over many iterations. The new facet is that the same bytes can be processed with very different latency, throughput, and memory cost depending on the read strategy.
 
 ## Performance starts with a requirement
 
@@ -1875,13 +2160,13 @@ When work arrives faster than a component can process it immediately, the work w
 
 ```text
 Arrival rate > service rate
-        ↓
+         ↓
 Queue grows
-        ↓
+         ↓
 Waiting time grows
-        ↓
+         ↓
 Deadlines are missed
-        ↓
+         ↓
 Retries or new work add more load
 ```
 
@@ -2070,17 +2355,17 @@ A slow dependency causes requests to remain active longer. More active requests 
 
 ```text
 Slow dependency
-    ↓
+     ↓
 Requests remain active longer
-    ↓
+     ↓
 Workers and connections become occupied
-    ↓
+     ↓
 Queues grow
-    ↓
+     ↓
 Timeouts increase
-    ↓
+     ↓
 Retries add more work
-    ↓
+     ↓
 System becomes less reliable
 ```
 
@@ -2103,7 +2388,106 @@ They ask:
 9. What new failure mode will the change introduce?
 10. How will the improvement be measured after deployment?
 
-This process prevents two common mistakes: optimizing a component that is not limiting the result and improving normal-case speed while making overload behavior unsafe.
+This process prevents two common mistakes: optimizing a component that is not limiting the result, and improving normal-case speed while making overload behavior unsafe.
+
+## A runnable tiny example: streaming versus batched reads
+
+The program below benchmarks `tiny`'s read two ways over N iterations: a streaming `bufio.Scanner` path that processes line by line, and a batched `os.ReadFile` path that reads the whole file then processes it. `runBench` reports total time, throughput (MB/s), and p95 latency for each strategy.
+
+```go
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"math"
+	"os"
+	"sort"
+	"time"
+)
+
+// streamRead reads TINY_FILE line-by-line with a buffered scanner, processing
+// each line as it arrives (small, bounded memory).
+func streamRead(path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	var processed int64
+	for sc.Scan() {
+		processed += int64(len(sc.Bytes())) // simulate per-line work
+	}
+	return processed, sc.Err()
+}
+
+// batchRead reads the whole file into memory and then processes it. It can be
+// faster for small files but consumes memory proportional to file size.
+func batchRead(path string) (int64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	var processed int64
+	rest := data
+	for len(rest) > 0 {
+		var line []byte
+		if i := indexByte(rest, '\n'); i >= 0 {
+			line, rest = rest[:i], rest[i+1:]
+		} else {
+			line, rest = rest, nil
+		}
+		processed += int64(len(line))
+	}
+	return processed, nil
+}
+
+func indexByte(b []byte, c byte) int {
+	for i, x := range b {
+		if x == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// runBench runs fn N times and returns total time, throughput, and p95 latency.
+func runBench(name, path string, n int, fn func(string) (int64, error)) {
+	var latencies []time.Duration
+	start := time.Now()
+	var totalBytes int64
+	for i := 0; i < n; i++ {
+		t0 := time.Now()
+		b, err := fn(path)
+		dt := time.Since(t0)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s run %d failed: %v\n", name, i, err)
+			os.Exit(1)
+		}
+		totalBytes += b
+		latencies = append(latencies, dt)
+	}
+	total := time.Since(start)
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	idx := int(math.Min(float64(len(latencies)*95/100), float64(len(latencies)-1)))
+	p95 := latencies[idx]
+	mbps := float64(totalBytes) / (1024 * 1024) / total.Seconds()
+	fmt.Printf("%-8s: total=%s p95=%s throughput=%.2f MB/s bytes=%d\n",
+		name, total, p95, mbps, totalBytes)
+}
+
+func main() {
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
+	const iterations = 50
+	fmt.Printf("benchmarking %s over %d iterations (streaming vs batched)\n", path, iterations)
+	runBench("stream", path, iterations, streamRead)
+	runBench("batch", path, iterations, batchRead)
+}
+```
 
 ## Interview definitions
 
@@ -2191,17 +2575,11 @@ The practical method is to define a real requirement, measure a representative w
 
 The best performance work often removes unnecessary work and keeps the system simple. When complexity is necessary, it should come with limits, observability, safe overload behavior, and a clear reason for existing.
 
-## If you want to build this later
-
-Build a small performance laboratory with three programs: a CPU-heavy program, a file-reading program, and a network client.
-
-Give each program configurable input size and concurrency. Measure total time, throughput, average latency, and p95 latency. Then change one factor at a time: add workers, increase input, reuse buffers, batch operations, or add an artificial delay to a dependency.
-
-The goal is to observe where throughput stops improving, where latency begins to grow, and how the bottleneck moves after an optimization. Record each result with the workload and configuration so that the numbers remain meaningful.
+**Where this leaves us** — `tiny` now has a benchmark that reports total time, throughput, and p95 latency for streaming versus batched reads. Chapter 6 changes what `tiny` writes: instead of plain text it emits an explicit, portable binary record format with a version and length prefix.
 
 ## Chapter 6 — Portability, Compatibility, and Abstraction Leaks
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 5 measured `tiny` reading a plain-text file whose format was implicit. This chapter gives `tiny` an explicit portable record format — version and length prefixes in a fixed byte order — and shows why writing an in-memory struct raw to disk is unsafe across compilers and architectures.
 
 ## Portability and compatibility are different
 
@@ -2213,7 +2591,7 @@ A system can be portable but not compatible. A program may compile on both Linux
 
 A system can be compatible but not portable. A service may preserve its network API across versions while only running on one operating system.
 
-```rs
+```text
 Portability
     Same software across different environments
 
@@ -2337,9 +2715,9 @@ An API, or application programming interface, is the source-level contract that 
 
 ```text
 Application source code
-        ↓ API
+         ↓ API
 Compiler-generated code
-        ↓ ABI
+         ↓ ABI
 Library, runtime, operating system, or other binary
 ```
 
@@ -2543,6 +2921,120 @@ Check:
 
 Then reduce the problem to the smallest difference that changes the result. A small compatibility test is more valuable than a general statement that “the platforms behave differently.”
 
+## A runnable tiny example: a portable binary record format
+
+The program below is `tiny` rewritten to emit an explicit, portable record instead of raw text: a 6-byte header with a big-endian `version` (uint16) and `length` (uint32), followed by the payload. `writeRecord` and `readRecord` use `encoding/binary` so the on-disk layout never depends on Go's struct padding or host byte order. The short C illustration after it shows why writing a raw struct is unsafe.
+
+```go
+package main
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"os"
+)
+
+// RecordHeader is the explicit, portable on-disk format for a tiny record:
+//   bytes 0-1: version  uint16 big-endian
+//   bytes 2-5: length   uint32 big-endian (payload length)
+//   bytes 6-n: payload  raw bytes
+// Each field is written explicitly so the file does not depend on Go's
+// in-memory struct layout, padding, or host byte order.
+const recordVersion = 1
+
+// writeRecord appends a length-prefixed record to buf.
+func writeRecord(buf *bytes.Buffer, payload []byte) error {
+	var hdr [6]byte
+	binary.BigEndian.PutUint16(hdr[0:2], recordVersion)
+	binary.BigEndian.PutUint32(hdr[2:6], uint32(len(payload)))
+	if _, err := buf.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err := buf.Write(payload)
+	return err
+}
+
+// readRecord reads exactly one record from r and validates it.
+func readRecord(r *bytes.Reader) ([]byte, error) {
+	var hdr [6]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, err
+	}
+	version := binary.BigEndian.Uint16(hdr[0:2])
+	length := binary.BigEndian.Uint32(hdr[2:6])
+	if version != recordVersion {
+		return nil, fmt.Errorf("unsupported record version %d", version)
+	}
+	if length > 1<<30 {
+		return nil, fmt.Errorf("implausible record length %d", length)
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func main() {
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
+	src, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
+		os.Exit(1)
+	}
+
+	// Build a portable record and write it to a file.
+	var buf bytes.Buffer
+	if err := writeRecord(&buf, src); err != nil {
+		fmt.Fprintf(os.Stderr, "write record: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile("tiny.record", buf.Bytes(), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "write file: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("wrote tiny.record (%d-byte header + %d payload)\n", 6, len(src))
+
+	// Read it back and validate.
+	back, err := os.ReadFile("tiny.record")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read record file: %v\n", err)
+		os.Exit(1)
+	}
+	rec, err := readRecord(bytes.NewReader(back))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read record: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Print(string(rec))
+}
+```
+
+```c
+/* UNSAFE: writing a Go/C struct raw to disk is not portable.
+   The compiler may insert padding after 'version' to align 'length',
+   and the byte order of multi-byte fields depends on the CPU. */
+struct Header {
+    uint16_t version;        /* maybe padded here */
+    uint32_t payload_length;
+};
+
+/* Safer: serialize each field explicitly in a defined byte order. */
+void write_header(uint8_t *out, uint16_t version, uint32_t len) {
+    out[0] = (version >> 8) & 0xFF;   /* big-endian version */
+    out[1] =  version       & 0xFF;
+    out[2] = (len >> 24) & 0xFF;      /* big-endian length  */
+    out[3] = (len >> 16) & 0xFF;
+    out[4] = (len >> 8)  & 0xFF;
+    out[5] =  len        & 0xFF;
+}
+```
+
 ## Interview definitions
 
 ### What is portability?
@@ -2629,17 +3121,11 @@ Operating systems, CPU architectures, filesystems, compilers, runtimes, configur
 
 The goal is not to hide every difference or support every platform. The goal is to know which differences matter, contain them in clear interfaces, and evolve systems without surprising the components that depend on them.
 
-## If you want to build this later
-
-Build a small cross-platform file-format tool. Define a binary record format with an explicit version, fixed-width fields, byte order, payload length, and checksum.
-
-Write records on one machine and read them on another environment. Add a second format version with an optional field, then make the reader support both versions during a migration. Test truncated records, invalid lengths, corrupted checksums, and unknown fields.
-
-The project should teach the difference between in-memory representation and portable representation, and it should make compatibility a deliberate part of the design rather than an accidental property of one machine.
+**Where this leaves us** — `tiny` now writes and validates a length-prefixed record whose format no longer depends on Go's struct layout or host byte order. Chapter 7 rewrites `tiny` in C, performing the same file read with `open`, `read`, `write`, and `close` and leaving every cleanup decision to the programmer.
 
 ## Chapter 7 — C as a Systems Programming Language
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 6 defined a portable binary format for `tiny` in Go; this chapter rewrites `tiny` in C to perform the read at the level of `open`, `read`, `write`, and `close`. The new facet is that C exposes the kernel boundary directly and leaves every cleanup decision to the programmer.
 
 ## Why C became important for systems
 
@@ -3027,15 +3513,15 @@ A robust implementation defines limits and checks every conversion:
 
 ```text
 Read length field
-    ↓
+     ↓
 Validate encoding and maximum allowed size
-    ↓
+     ↓
 Check arithmetic before allocation
-    ↓
+     ↓
 Allocate or use a bounded buffer
-    ↓
+     ↓
 Read until the required bytes arrive or the deadline expires
-    ↓
+     ↓
 Reject malformed or incomplete input
 ```
 
@@ -3061,6 +3547,70 @@ They ask:
 - How will sanitizers, tests, and monitoring detect a mistake?
 
 They also avoid treating cleverness as quality. Clear code with a visible lifetime and a simple cleanup path is often safer than a compact trick that saves a few instructions but makes ownership difficult to review.
+
+## A runnable tiny example: tiny in C
+
+The program below is `tiny` in C. It reads the file named by `TINY_FILE` (default `message.txt`) using `getenv`, `open`, a `read` loop into a fixed buffer, `write` to standard output, and `close`. `perror` turns `errno` into a human-readable message, and non-zero exit codes signal failure. A `Make` comment shows the minimal build.
+
+```c
+/* tiny.c — a C version of the tiny program.
+ *
+ * Build with:  cc -O2 -o tiny_c tiny.c
+ *   or via Make:
+ *     tiny_c: tiny.c
+ *         cc -O2 -o $@ $<
+ *
+ * Reads the file named by TINY_FILE (default "message.txt") and writes its
+ * contents to standard output. Exits non-zero on any failure.
+ */
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+#define BUFSZ 4096
+
+int main(void) {
+    const char *path = getenv("TINY_FILE");
+    if (path == NULL || path[0] == '\0') {
+        path = "message.txt";
+    }
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        perror(path);          /* prints "path: <errno description>" to stderr */
+        return 1;
+    }
+
+    char buffer[BUFSZ];
+    ssize_t n;
+    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = write(STDOUT_FILENO, buffer + off, (size_t)(n - off));
+            if (w < 0) {
+                perror("write");
+                close(fd);
+                return 1;
+            }
+            off += w;
+        }
+    }
+    if (n < 0) {
+        perror("read");
+        close(fd);
+        return 1;
+    }
+
+    if (close(fd) != 0) {
+        perror("close");
+        return 1;
+    }
+    return 0;
+}
+```
 
 ## Interview definitions
 
@@ -3148,17 +3698,11 @@ The same control creates responsibility. The programmer must track object lifeti
 
 The best C code is not code that uses the most tricks. It is code with clear contracts, visible ownership, checked boundaries, predictable cleanup, and enough tooling to catch mistakes before they become production failures.
 
-## If you want to build this later
-
-Build a small C command-line utility that reads a length-prefixed binary file format and prints its records.
-
-Define the file format explicitly, validate every length, handle truncated and corrupted input, allocate memory safely, clean up on every error path, and run the program with AddressSanitizer and UndefinedBehaviorSanitizer enabled.
-
-Then add a second format version and make the reader support both versions. This project connects C's pointers, buffers, structures, error handling, ownership, undefined behavior, and portability concerns in one focused system.
+**Where this leaves us** — `tiny` now exists in C, where `perror` reports `errno`, exit codes signal failure, and the programmer must close the descriptor on every path. Chapter 8 reimplements the record reader from Chapter 6 in Rust and Zig to compare how each language expresses ownership and error handling.
 
 ## Chapter 8 — Rust, Zig, Go, and C Tradeoffs
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 7 implemented `tiny` in C; this chapter reimplements Chapter 6's length-prefixed record reader in Rust and Zig. The new facet is the tradeoff between compiler-enforced ownership, explicit manual control, and a managed runtime — the same format, three ownership stories.
 
 ## Compare responsibilities, not syntax
 
@@ -3166,15 +3710,15 @@ A language comparison is not mainly about whether one language has shorter synta
 
 ```text
 System requirements
-        ↓
+         ↓
 Memory and ownership model
-        ↓
+         ↓
 Runtime and scheduling behavior
-        ↓
+         ↓
 Error and concurrency model
-        ↓
+         ↓
 Tooling, deployment, and team cost
-        ↓
+         ↓
 Language choice
 ```
 
@@ -3409,9 +3953,9 @@ The boundary introduces risks. The languages may disagree about memory ownership
 
 ```text
 Rust or Go code
-        ↓ FFI boundary
+         ↓ FFI boundary
 C-compatible function and data layout
-        ↓
+         ↓
 Native library or operating-system interface
 ```
 
@@ -3488,11 +4032,11 @@ The languages can be viewed along two related dimensions: how much direct contro
 
 ```text
 More direct control
-        ↑
-        | C, Zig                 Rust
-        |
-        |                         Go
-        +--------------------------------→ More managed behavior
+         ↑
+         | C, Zig                 Rust
+         |
+         |                         Go
+         +--------------------------------→ More managed behavior
 ```
 
 This diagram is only a rough mental model. Rust can provide very direct control while enforcing more rules. Go can use low-level operating-system interfaces, and C can use higher-level libraries.
@@ -3519,6 +4063,94 @@ They ask:
 - What is the cost of a memory-safety or availability failure?
 
 They also distinguish a language problem from a design problem. A service with poor timeouts, unbounded queues, or an inefficient database query will not become reliable merely because it is written in Rust or Go.
+
+## A runnable tiny example: the record reader in Rust and Zig
+
+The length-prefixed record reader from Chapter 6 is reimplemented below in Rust and Zig. Both read a big-endian `version` (uint16) and `length` (uint32) and validate them before reading the payload. Rust encodes ownership in the type system: `read_record` borrows its reader and returns an owned `Vec<u8>` whose drop frees the buffer. Zig makes the allocator explicit: the caller supplies it and owns the returned slice, which must be freed with the same allocator.
+
+```rust
+use std::env;
+use std::fs;
+use std::io::{Read, Write};
+
+const VERSION: u16 = 1;
+
+// Ownership: `data` is owned by main and borrowed here. The function returns a
+// freshly allocated Vec<u8>, transferring ownership of the payload to the caller.
+fn read_record<R: Read>(r: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut hdr = [0u8; 6];
+    r.read_exact(&mut hdr)?;                       // ? propagates the error
+    let version = u16::from_be_bytes([hdr[0], hdr[1]]);
+    let len = u32::from_be_bytes([hdr[2], hdr[3], hdr[4], hdr[5]]) as usize;
+    if version != VERSION {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unsupported version {version}"),
+        ));
+    }
+    let mut payload = vec![0u8; len];
+    r.read_exact(&mut payload)?;
+    Ok(payload)                                    // ownership moves to caller
+}
+
+fn main() -> std::io::Result<()> {
+    let path = env::var("TINY_FILE").unwrap_or_else(|_| "message.txt".into());
+    let data = fs::read(&path)?;
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&VERSION.to_be_bytes());
+    buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    buf.extend_from_slice(&data);
+    fs::write("tiny.record", &buf)?;
+
+    let mut reader = &buf[..];
+    let payload = read_record(&mut reader)?;
+    std::io::stdout().write_all(&payload)?;
+    Ok(())
+}
+```
+
+```zig
+const std = @import("std");
+
+const VERSION: u16 = 1;
+
+// The caller chooses the allocator; ownership of the returned slice belongs to
+// the caller, who must free it with the same allocator.
+fn readRecord(allocator: std.mem.Allocator, reader: anytype) ![]u8 {
+    var hdr: [6]u8 = undefined;
+    try reader.readNoEof(&hdr);
+    const version = std.mem.readInt(u16, hdr[0..2], .big);
+    const len = std.mem.readInt(u32, hdr[2..6], .big);
+    if (version != VERSION) return error.UnsupportedVersion;
+    const payload = try allocator.alloc(u8, len);
+    errdefer allocator.free(payload);
+    try reader.readNoEof(payload);
+    return payload;
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
+    const path = std.process.getenv("TINY_FILE") orelse "message.txt";
+    const data = try std.fs.cwd().readFileAlloc(allocator, path, 1 << 30);
+    defer allocator.free(data);
+
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+    try buf.appendSlice(std.mem.asBytes(&std.mem.nativeToBig(u16, VERSION)));
+    try buf.appendSlice(std.mem.asBytes(&std.mem.nativeToBig(u32, @intCast(data.len))));
+    try buf.appendSlice(data);
+    try std.fs.cwd().writeFile("tiny.record", buf.items);
+
+    var record_reader = std.io.fixedBufferStream(buf.items).reader();
+    const payload = try readRecord(allocator, &record_reader);
+    defer allocator.free(payload);
+    try std.io.getStdOut().writeAll(payload);
+}
+```
+
+Compared with the Go version in Chapter 6, the three implementations differ mainly in where ownership lives. Go relies on the garbage collector for the payload buffer while still requiring the file to be closed explicitly; Rust moves ownership through the type system and frees the `Vec` when it leaves scope; Zig makes the allocator a visible parameter and leaves the free call to the caller. None of them removes the need to define the byte order and validate the length — that part of the contract is identical in every language.
 
 ## Interview definitions
 
@@ -3606,24 +4238,92 @@ C offers established integration and direct control with substantial manual safe
 
 The right language is the one whose tradeoffs fit the system. A language can reduce certain classes of bugs or make deployment easier, but it cannot replace good boundaries, resource limits, failure handling, measurement, or engineering judgment.
 
-## If you want to build this later
-
-Build the same small length-prefixed file reader in C, Rust, Zig, and Go.
-
-Use the same file format, validation rules, corrupted-input tests, and expected outputs in each implementation. Compare how each language expresses ownership, allocation, error handling, cleanup, binary parsing, testing, and cross-compilation.
-
-Do not judge the languages only by lines of code. Record what each version makes easy to express, what mistakes the compiler or runtime catches, what responsibilities remain manual, how the binaries are built, and how easy each version is to explain and maintain.
+**Where this leaves us** — `tiny` is now expressed in four languages — Go, C, Rust, and Zig — each making a different ownership promise. In Part II, `tiny` stops being just source and becomes a process the OS manages: Chapter 9 shows what the operating system provides to that process.
 
 # Part II — Linux and Operating System Internals
 
-Stage 2 moves from general resources to the concrete place they are managed: the kernel and the Linux interfaces that expose it. The tiny program becomes a process you can inspect.
+Stage 2 moves from general resources to the concrete place they are managed: the kernel and the Linux interfaces that expose it. Up to now `tiny` has been a snippet you compile; here it becomes a real process you can launch, watch, signal, and inspect through `/proc`. In the chapters that follow we treat `tiny` as a managed unit: Chapter 9 shows the OS services that give it an address space, descriptors, and identity; Chapter 10 drops the `os` package and issues the raw syscalls that `strace` can display; Chapter 11 follows its fork/exec lifecycle and the zombie it leaves until reaped; Chapter 12 adds signals and a supervisor that stops it cleanly; Chapter 13 opens regular files, `/proc`, `/sys`, and device nodes through one VFS interface; Chapter 14 reads its clocks, hostname, and environment; Chapter 15 pins it to a CPU and measures context-switch cost; and Chapter 16 sets its resource limits and watches the OOM boundary. By the end `tiny` is no longer an abstraction — it is something the kernel schedules, isolates, and accounts for.
 
 ---
 
-
 ## Chapter 9 — What the Operating System Provides
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+In Part I `tiny` was a thirty-line Go program we compiled and ran to read a file. Here it stops being a snippet and becomes a process: a kernel-managed instance with a PID, an address space, open descriptors, and a lifetime the OS tracks for us. The program below launches `tiny` as a child and then reads the kernel's own `/proc` records, so you can see the operating-system abstraction doing its job.
+
+## A runnable view: tiny as a managed process
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// supervisor starts tiny as a child process and then inspects it through /proc,
+// showing that the kernel already provides the process abstraction for free.
+func main() {
+	// Use the same program name the rest of the book uses.
+	cmd := exec.Command("./tiny")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "start tiny: %v\n", err)
+		os.Exit(1)
+	}
+	pid := cmd.Process.Pid
+	fmt.Printf("supervisor: launched tiny as PID %d\n", pid)
+
+	// Give the child a moment to open its file and settle.
+	time.Sleep(200 * time.Millisecond)
+
+	showStatus(pid)
+	showCmdline(pid)
+
+	// Let tiny finish naturally, then confirm the OS reaped it.
+	if err := cmd.Wait(); err != nil {
+		fmt.Fprintf(os.Stderr, "wait tiny: %v\n", err)
+	}
+	fmt.Printf("supervisor: tiny (PID %d) exited\n", pid)
+}
+
+// showStatus reads /proc/<pid>/status and prints a few OS-managed fields.
+func showStatus(pid int) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read status: %v\n", err)
+		return
+	}
+	fmt.Printf("\n--- /proc/%d/status (kernel view of tiny) ---\n", pid)
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.HasPrefix(line, "Name:"),
+			strings.HasPrefix(line, "State:"),
+			strings.HasPrefix(line, "Pid:"),
+			strings.HasPrefix(line, "PPid:"),
+			strings.HasPrefix(line, "Threads:"),
+			strings.HasPrefix(line, "VmRSS:"):
+			fmt.Println(line)
+		}
+	}
+}
+
+// showCmdline reads /proc/<pid>/cmdline, which the kernel keeps NUL-separated.
+func showCmdline(pid int) {
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read cmdline: %v\n", err)
+		return
+	}
+	parts := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+	fmt.Printf("\n--- /proc/%d/cmdline ---\n", pid)
+	fmt.Printf("command: %s\n", filepath.Base(parts[0]))
+}
+```
 
 ## The operating system sits between programs and hardware
 
@@ -3967,7 +4667,7 @@ Operating system environment
 └── Applications and services
 ```
 
-When engineers say “Linux,” they may mean the Linux kernel, a complete Linux distribution, or the environment inside a container. Those are related but not identical.
+When engineers say "Linux," they may mean the Linux kernel, a complete Linux distribution, or the environment inside a container. Those are related but not identical.
 
 The kernel provides the core mechanisms. User-space libraries and tools provide convenient interfaces and operational behavior on top of them.
 
@@ -3995,7 +4695,7 @@ When debugging, the engineer may need to identify which layer produced the obser
 
 ## A realistic production example
 
-Imagine a service that cannot accept new client connections. The application reports a generic “server busy” error.
+Imagine a service that cannot accept new client connections. The application reports a generic "server busy" error.
 
 The investigation finds that the CPU is only moderately used and memory is available. The process has reached its file-descriptor limit because a code path failed to close connections after a protocol error. The kernel is still healthy, but the process cannot create the descriptors required for new sockets.
 
@@ -4075,27 +4775,27 @@ The model is not a substitute for evidence. It tells the engineer where to look.
 
 ## Common misconceptions
 
-### “The operating system only manages CPU and memory.”
+### "The operating system only manages CPU and memory."
 
 It also manages files, storage, network interfaces, devices, security, process communication, timers, resource limits, and many other shared services.
 
-### “A process is just a program currently running.”
+### "A process is just a program currently running."
 
 A process includes execution state, an address space, identity, open resources, limits, and relationships with other processes.
 
-### “Kernel space is just another folder.”
+### "Kernel space is just another folder."
 
 Kernel space is a privileged execution environment protected by the processor and operating system. It is not a directory or ordinary storage location.
 
-### “A system call is the same as a normal function call.”
+### "A system call is the same as a normal function call."
 
 A normal function call stays within the current process and privilege level. A system call crosses from user space into the privileged kernel and follows a different validation and execution path.
 
-### “The operating system hides all hardware behavior.”
+### "The operating system hides all hardware behavior."
 
 It hides many details through abstractions, but hardware latency, device errors, cache behavior, capacity limits, and ordering guarantees can still affect programs.
 
-### “If the kernel reclaims resources after a crash, application cleanup does not matter.”
+### "If the kernel reclaims resources after a crash, application cleanup does not matter."
 
 The kernel can reclaim many local resources, but it cannot undo every external effect. Persistent data, messages, remote requests, and distributed state still need application-level recovery.
 
@@ -4107,17 +4807,68 @@ User space and kernel space form an important protection boundary. Programs requ
 
 The operating system provides useful abstractions, but the details underneath can still affect correctness, performance, security, and failure behavior. When debugging a system, place the symptom in the operating-system model and identify which layer is responsible for the observed result.
 
-## If you want to build this later
-
-Build a small Linux process-inspection tool that reports the operating-system resources of a target process.
-
-Start with the process ID and command line. Then read information from `/proc` such as memory usage, open file descriptors, CPU time, and status. Add a mode that watches the process over time and reports changes.
-
-The goal is not to recreate every feature of `ps` or `top`. It is to connect an ordinary process to the operating-system services introduced in this article and prepare for the deeper articles about system calls, processes, memory, files, and resource limits.
-
+**Where this leaves us** — `tiny` is now a managed process with a PID, open descriptors, and a `/proc` record an operator can read. Next, Chapter 10 strips the `os` package away and rebuilds `tiny` on the raw syscalls that create those reads and writes, so we can watch them with `strace`.
 ## Chapter 10 — System Calls: How Programs Request Kernel Services
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 9 showed that the OS gives `tiny` a process with descriptors and identity, but it did all of that through the `os` package. Now we strip that convenience away and rebuild `tiny` on raw syscalls so we can see exactly which kernel requests `open`, `read`, `write`, and `close` turn into. Run `strace -f ./tiny` against the program below to watch each transition.
+
+## A runnable view: tiny on raw syscalls
+
+```go
+package main
+
+// tiny implemented directly on raw Linux syscalls instead of the os package.
+// Build: go build -o tiny .
+// Run:   TINY_FILE=message.txt ./tiny
+// Trace: strace -f ./tiny     # watch openat/read/write/close
+
+import (
+	"fmt"
+	"os"
+
+	"golang.org/x/sys/unix"
+)
+
+func main() {
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
+
+	// openat(AT_FDCWD, path, O_RDONLY, 0) -> fd
+	fd, err := unix.Openat(unix.AT_FDCWD, path, unix.O_RDONLY, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	defer unix.Close(fd)
+
+	// strace will show: openat(AT_FDCWD, "message.txt", O_RDONLY) = 3
+	buf := make([]byte, 4096)
+	for {
+		// read(fd, buf, len(buf)) -> n
+		n, err := unix.Read(fd, buf)
+		if n > 0 {
+			// write(1, buf[:n], n)
+			if _, werr := unix.Write(unix.STDOUT_FILENO, buf[:n]); werr != nil {
+				fmt.Fprintf(os.Stderr, "write: %v\n", werr)
+				os.Exit(1)
+			}
+		}
+		if err == unix.EINTR {
+			continue // retry if the syscall was interrupted by a signal
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read: %v\n", err)
+			os.Exit(1)
+		}
+		if n == 0 {
+			break // end of file, strace shows read(3, "", 4096) = 0
+		}
+	}
+	// strace will show: close(3) = 0  then  exit_group(0)
+}
+```
 
 ## Why a program cannot simply call the kernel's functions
 
@@ -4340,7 +5091,7 @@ Code must follow the contract for the specific call. Blindly retrying every inte
 
 For a read that has not produced data, retrying may be reasonable. For an operation that may have partially completed, the program must inspect the result and avoid duplicating effects.
 
-This is another example of why errors are part of the interface. A return value does not only say “success” or “failure”; it may describe how far the operation progressed.
+This is another example of why errors are part of the interface. A return value does not only say "success" or "failure"; it may describe how far the operation progressed.
 
 ## A concrete example: `write`
 
@@ -4361,7 +5112,7 @@ The program supplies:
 
 The library or compiler exposes the call according to the platform's ABI. The kernel checks the descriptor, validates that the user buffer can be read, and routes the data to the object behind the descriptor. That object could be a terminal, pipe, regular file, socket, or redirected output.
 
-The system call does not need to know that the application thinks of the destination as “the screen.” It operates on the kernel-managed object represented by the descriptor.
+The system call does not need to know that the application thinks of the destination as "the screen." It operates on the kernel-managed object represented by the descriptor.
 
 ## File descriptors are capabilities within a process
 
@@ -4500,7 +5251,7 @@ The team considers several changes:
 
 After batching, CPU usage may increase slightly because more data is processed per operation, while request latency and throughput improve. The team still needs limits so buffering does not create unbounded memory usage.
 
-The important lesson is not “always reduce syscalls.” It is that system-call traces can reveal the real interaction between application code and the kernel, and that the correct optimization depends on the operation's resource behavior.
+The important lesson is not "always reduce syscalls." It is that system-call traces can reveal the real interaction between application code and the kernel, and that the correct optimization depends on the operation's resource behavior.
 
 ## How experienced engineers reason about system calls
 
@@ -4573,23 +5324,23 @@ They use the highest-level explanation that remains accurate, then inspect lower
 
 ## Common misconceptions
 
-### “Every library function is a system call.”
+### "Every library function is a system call."
 
 Many library functions are entirely user-space operations. Others call the kernel only when needed or buffer multiple application operations into fewer system calls.
 
-### “A successful system call completed all requested work.”
+### "A successful system call completed all requested work."
 
 Some calls return partial progress. A successful return may mean that only part of a buffer was read or written, or that an operation was accepted for later processing.
 
-### “A system call is just a slow function call.”
+### "A system call is just a slow function call."
 
 A system call crosses a privilege boundary, requires validation, and may interact with kernel state, devices, scheduling, and blocking behavior. Its cost and semantics are different from an ordinary function call.
 
-### “The kernel can trust pointers from a process.”
+### "The kernel can trust pointers from a process."
 
 Pointers and lengths come from user space and must be treated as untrusted input. They may be invalid or intentionally crafted.
 
-### “If a call timed out, the operation did not happen.”
+### "If a call timed out, the operation did not happen."
 
 A timeout tells the caller that no result arrived before the deadline. The operation may still have completed remotely or may continue after the caller stops waiting.
 
@@ -4601,17 +5352,84 @@ System calls have precise contracts around arguments, pointers, lengths, return 
 
 The system-call boundary is both a performance boundary and a security boundary. It can introduce transition and validation costs, and it must prevent untrusted programs from corrupting protected state. Understanding the boundary makes tools such as `strace` much more useful and prepares us to study processes, files, memory, networking, and devices in detail.
 
-## If you want to build this later
-
-Build a small Linux system-call observability tool.
-
-Start with a program that opens a file, reads it in chunks, writes the data to standard output, and closes the file. Trace it with `strace` and compare the source-level operations with the actual calls. Then add buffering, change the chunk size, introduce an error path, and observe how the trace changes.
-
-The goal is to see the difference between library code and kernel requests, understand return values and cleanup, and connect system-call count with performance and resource behavior.
+**Where this leaves us** — `tiny` now performs its whole job through `open`/`read`/`write`/`close` syscalls you can watch with `strace`. Next, Chapter 11 follows how the kernel creates and destroys that process across `fork`, `exec`, and `wait`, and what is left behind until a parent reaps it.
 
 ## Chapter 11 — Linux Processes and Lifecycle
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 10 revealed that `tiny`'s read is a handful of syscalls issued by one running process. We now follow what creates that process and what must clean it up: `fork`/`exec` bring `tiny` to life, and until a parent `wait`s it leaves a zombie behind. The program below forks `tiny`, lets it exit, and reads `/proc` to show the defunct state before reaping it.
+
+## A runnable view: tiny's lifecycle and the zombie
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+// parent forks tiny, reads /proc to show the zombie state, then reaps it.
+func main() {
+	cmd := exec.Command("./tiny")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "start: %v\n", err)
+		os.Exit(1)
+	}
+	pid := cmd.Process.Pid
+	fmt.Printf("parent: started tiny, pid=%d\n", pid)
+
+	// Wait for the child to exit, but do NOT yet reap it.
+	if err := cmd.Process.Wait(); err != nil {
+		fmt.Fprintf(os.Stderr, "first wait: %v\n", err)
+	}
+	fmt.Printf("parent: tiny exited, but not yet reaped\n")
+
+	// At this point tiny is a zombie: the kernel kept its exit record.
+	showZombie(pid)
+
+	// Sleep so the reader can observe the defunct state via `ps`.
+	time.Sleep(500 * time.Millisecond)
+
+	// Reap using wait4, collecting the status so the zombie disappears.
+	var status unix.WaitStatus
+	var rusage unix.Rusage
+	if _, err := unix.Wait4(pid, &status, 0, &rusage); err != nil {
+		fmt.Fprintf(os.Stderr, "wait4: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("parent: reaped tiny (exit=%d), zombie gone\n", status.ExitStatus())
+}
+
+// showZombie reads /proc/<pid>/stat and prints the state letter (Z = zombie).
+func showZombie(pid int) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read stat: %v\n", err)
+		return
+	}
+	// stat format: pid (comm) state ...
+	end := indexByte(data, ')')
+	if end >= 0 && end+2 < len(data) {
+		state := data[end+2] // space + state letter
+		fmt.Printf("parent: /proc/%d/stat state=%c (Z = zombie/defunct)\n", pid, state)
+	}
+}
+
+func indexByte(b []byte, c byte) int {
+	for i := range b {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+```
 
 ## A program is not a process
 
@@ -4877,15 +5695,15 @@ Tools such as `ps`, `/proc`, `pstree`, `lsof`, and `strace` answer different par
 
 ## Common misconceptions
 
-### “`fork` copies all memory immediately.”
+### "`fork` copies all memory immediately."
 
 Copy-on-write shares pages until a write — logical spaces are separate, physical pages temporarily shared.
 
-### “`exec` starts a child.”
+### "`exec` starts a child."
 
 It replaces the current image; it does not create a new PID.
 
-### “A zombie holds all its memory.”
+### "A zombie holds all its memory."
 
 Most resources are reclaimed; only a small exit record remains, but many zombies exhaust the process table.
 
@@ -4893,13 +5711,98 @@ Most resources are reclaimed; only a small exit record remains, but many zombies
 
 A process is the kernel's lifecycle abstraction: `fork` creates, `exec` replaces, `wait` reaps. Copy-on-write, descriptor inheritance with `close-on-exec`, and zombie/orphan handling determine whether a backend leaks resources or cleans up. The next layer is *notification* — signals and supervision — which decides how a process is asked to stop.
 
-## If you want to build this later
-
-Build a tiny shell that does one `fork → exec → wait` pipeline. Start with a single command, then add `close-on-exec` verification by listing `/proc/self/fd` before and after `exec`. Inject a bug where the parent skips `wait` on success and observe zombies with `ps`. Fix it and add `waitpid(-1, &status, WNOHANG)` in a loop to reap all children. This connects lifecycle, descriptor inheritance, and reaping before you add signals in the next article.
-
+**Where this leaves us** — `tiny` now has a full lifecycle: a parent forks and execs it, and it becomes a zombie until reaped. Next, Chapter 12 shows how a supervisor asks `tiny` to stop with `SIGTERM` before that reaping happens, instead of cutting it off mid-read.
 ## Chapter 12 — Linux Signals and Service Supervision
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 11 left `tiny` as a process that a parent must reap, but said nothing about how it should stop. This chapter adds signals: `tiny` installs a `SIGTERM` handler so a supervisor can ask it to drain and exit, instead of being killed mid-read. The program below is `tiny` with a clean-shutdown handler plus a supervisor that stops the whole process group with a deadline.
+
+## A runnable view: tiny with SIGTERM and a supervisor
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"os/signal"
+	"syscall"
+	"time"
+)
+
+// tiny12 is the supervised version of tiny: it installs a SIGTERM handler that
+// flushes and exits cleanly, and a separate supervisor program controls it.
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "supervise" {
+		supervise()
+		return
+	}
+	tiny()
+}
+
+// tiny runs the usual job but stops gracefully on SIGTERM.
+func tiny() {
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+
+	go func() {
+		<-stop
+		fmt.Fprintln(os.Stderr, "tiny: SIGTERM received, flushing and exiting")
+		// Real programs flush logs/buffers and close descriptors here.
+		os.Exit(0)
+	}()
+
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
+	if err := runJob(path); err != nil {
+		fmt.Fprintf(os.Stderr, "tiny: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runJob(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	fmt.Print(string(data))
+	return nil
+}
+
+// supervise starts tiny in its own process group and stops it with a deadline.
+func supervise() {
+	cmd := exec.Command("./tiny12")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// Put tiny in its own process group so we can signal the whole group.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "supervise: start: %v\n", err)
+		os.Exit(1)
+	}
+	pgid := cmd.Process.Pid
+	fmt.Printf("supervise: started tiny in pgid %d\n", pgid)
+
+	time.Sleep(300 * time.Millisecond)
+	fmt.Println("supervise: sending SIGTERM")
+	// Negative pid targets the whole process group.
+	syscall.Kill(-pgid, syscall.SIGTERM)
+
+	// TimeoutStopSec style deadline: wait, then SIGKILL if still alive.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		fmt.Printf("supervise: tiny exited cleanly: %v\n", err)
+	case <-time.After(2 * time.Second):
+		fmt.Println("supervise: deadline passed, sending SIGKILL")
+		syscall.Kill(-pgid, syscall.SIGKILL)
+		<-done
+	}
+}
+```
 
 ## Signals are asynchronous notifications
 
@@ -5087,15 +5990,15 @@ The tools answer only when connected to a hypothesis. Knowing that `SIGTERM` was
 
 ## Common misconceptions
 
-### “A service is healthy if its PID exists.”
+### "A service is healthy if its PID exists."
 
 A PID can exist while the process is stuck, blocked on a resource, or returning errors to every request. Check readiness and metrics, not just whether the process is alive.
 
-### “Signals are reliable messages.”
+### "Signals are reliable messages."
 
 They are not. They carry little information, they can be coalesced, and they have no acknowledgment. Use a pipe or a queue when you need payloads and ordering.
 
-### “`SIGKILL` is the safe way to stop a service.”
+### "`SIGKILL` is the safe way to stop a service."
 
 It skips cleanup. Buffered data can be lost and external leases can be left in an uncertain state. Prefer `SIGTERM` with a deadline.
 
@@ -5103,13 +6006,95 @@ It skips cleanup. Buffered data can be lost and external leases can be left in a
 
 A process gives you a container for execution. Signals give you a way to notify it. `SIGTERM` asks for a graceful drain, `SIGKILL` forces an immediate end, and a handler should do almost nothing except tell the main loop what happened. Long-running services need a supervisor that provides configuration, restart policy, resource limits, logging, and a deadline for shutdown. A healthy service is not just a live PID. It is a process that can make progress, report whether it is ready, and stop without dropping correctness.
 
-## If you want to build this later
-
-Extend the small shell from the previous article. Make it handle `SIGTERM` with the flag pattern and make a supervisor that respects a timeout. The supervisor should send `SIGTERM`, wait for `TimeoutStopSec`, and then send `SIGKILL` if the process has not exited. Have it kill the whole process group, not just the parent. Test it with a handler that sleeps through `SIGTERM` and with a pipeline where one stage ignores the signal. Check that the group is stopped and that zombies are still reaped. Then run the same logic as a `systemd` unit and watch how it throttles a crash loop.
+**Where this leaves us** — `tiny` can now shut down gracefully when signaled, and a supervisor can stop its whole group with a deadline before reaching `SIGKILL`. Next, Chapter 13 shows `tiny` reading more than a regular file, using the same `open`/`read`/`close` calls on `/proc`, `/sys`, and `/dev`.
 
 ## Chapter 13 — Linux Filesystem and System Interfaces
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 12 gave `tiny` a clean shutdown path, but every example still read one ordinary file. Here we widen the lens: the same `open`/`read`/`close` calls that read `TINY_FILE` also reach `/proc`, `/sys`, and `/dev`, because the VFS presents all of them as files. The program below opens each path type through one `readPath` helper so you can see the uniform interface.
+
+## A runnable view: tiny over the VFS
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+// tiny13 shows the VFS uniform interface: many different "files" are opened and
+// read through the same readPath helper.
+func main() {
+	paths := []string{
+		envOr("TINY_FILE", "message.txt"), // a regular file
+		"/proc/self/status",               // a /proc pseudo-file
+		"/sys/class/net",                  // a /sys directory
+		"/dev/null",                       // a character device node
+	}
+
+	for _, p := range paths {
+		readPath(p)
+	}
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// readPath opens p, prints its type or up to 200 bytes, then closes it.
+func readPath(p string) {
+	fmt.Printf("\n=== %s ===\n", p)
+	f, err := os.Open(p)
+	if err != nil {
+		fmt.Printf("  open error: %v\n", err)
+		return
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		fmt.Printf("  stat error: %v\n", err)
+		return
+	}
+	fmt.Printf("  type: %c mode:%o size:%d\n", typeChar(fi), fi.Mode().Perm(), fi.Size())
+
+	// For a directory such as /sys/class/net, list entries instead.
+	if fi.IsDir() {
+		names, err := f.Readdirnames(8)
+		if err != nil {
+			fmt.Printf("  readdir error: %v\n", err)
+			return
+		}
+		fmt.Printf("  entries: %v\n", names)
+		return
+	}
+
+	buf := make([]byte, 200)
+	n, err := f.Read(buf)
+	if n > 0 {
+		fmt.Printf("  first bytes:\n%s\n", string(buf[:n]))
+	}
+	if err != nil && err.Error() != "EOF" {
+		fmt.Printf("  read error: %v\n", err)
+	}
+}
+
+func typeChar(fi os.FileInfo) byte {
+	switch {
+	case fi.Mode().IsRegular():
+		return '-'
+	case fi.Mode().IsDir():
+		return 'd'
+	case fi.Mode()&os.ModeDevice != 0:
+		return 'c' // device node
+	default:
+		return '?'
+	}
+}
+```
 
 ## Not every file is stored on disk
 
@@ -5202,7 +6187,7 @@ The `fd` directory contains one symbolic link for each file descriptor visible t
 
 Descriptors 0, 1, and 2 are conventionally standard input, standard output, and standard error. Other descriptors may refer to files, pipes, sockets, devices, event objects, or anonymous kernel objects.
 
-This interface is useful when diagnosing “too many open files,” unexpected files that remain open, or a service that is holding a socket or pipe longer than expected.
+This interface is useful when diagnosing "too many open files," unexpected files that remain open, or a service that is holding a socket or pipe longer than expected.
 
 ### `/proc/<pid>/maps`
 
@@ -5426,7 +6411,7 @@ This is one reason a single snapshot is not always enough for diagnosis. Repeate
 
 ## A realistic production example
 
-Imagine a service that is reported as “running,” but requests are failing. The supervisor shows that the process has a live PID. The first assumption is that the application is healthy.
+Imagine a service that is reported as "running," but requests are failing. The supervisor shows that the process has a live PID. The first assumption is that the application is healthy.
 
 The engineer checks `/proc/<pid>/status` and sees that the process has many threads but little CPU activity. The file-descriptor directory shows a large number of sockets. `ss` shows many connections waiting in a state associated with slow clients. Service logs show request deadlines being exceeded, while kernel and network statistics show no hardware failure.
 
@@ -5508,19 +6493,19 @@ The goal is to turn a vague symptom into a system-level hypothesis that can be c
 
 ## Common misconceptions
 
-### “Everything under `/proc` is a normal file.”
+### "Everything under `/proc` is a normal file."
 
 The entries use file-like operations, but many are generated dynamically and have behavior that differs from persistent files.
 
-### “Writing to `/sys` edits a configuration file.”
+### "Writing to `/sys` edits a configuration file."
 
 Writing to a sysfs attribute usually sends a control request to the kernel or driver. The change may be immediate, temporary, restricted, or hardware-affecting.
 
-### “`/dev/sda` contains the entire disk as a normal file.”
+### "`/dev/sda` contains the entire disk as a normal file."
 
 It is a device node that provides access to a block-device driver. Operations on it have device and kernel semantics, not just ordinary file semantics.
 
-### “A process list is a reliable snapshot of the machine.”
+### "A process list is a reliable snapshot of the machine."
 
 Processes can start, exit, and change state while the list is being collected. It is an observation taken over a period, not necessarily one atomic view.
 
@@ -5534,17 +6519,82 @@ The systems-engineering habit is to begin with a question, inspect the interface
 
 Clocks, hostnames, and environment — the configuration side of these interfaces — are covered in the next article, *Linux Clocks, Hostnames, and Environment*.
 
-## If you want to build this later
-
-Build a small Linux system-inspection command that reports one target process in a readable format.
-
-Read `/proc/<pid>/status`, `/proc/<pid>/limits`, `/proc/<pid>/maps`, `/proc/<pid>/fd`, and `/proc/<pid>/cmdline`. Add options to show memory, open descriptors, threads, and resource limits. Handle processes that exit during inspection and explain in the output that the values are observations rather than one atomic snapshot.
-
-Then add a device mode that lists network interfaces through `/sys/class/net` and reports their state. The project should teach you to treat `/proc`, `/sys`, and `/dev` as system interfaces with contracts, permissions, races, and changing state.
-
+**Where this leaves us** — `tiny` now reads regular files, `/proc`, `/sys`, and devices through one VFS interface. Next, Chapter 14 reads the clocks, hostname, and environment the OS attaches to `tiny` itself.
 ## Chapter 14 — Linux Clocks, Hostnames, and Environment
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 13 treated many path types as one uniform file interface; this chapter looks at the configuration the OS attaches to `tiny` itself. Its clocks, hostname, and environment are inputs the kernel and parent hand to the process, and choosing the wrong clock or trusting the hostname can break a timeout or a routing decision. The program below prints both clocks, the hostname, a filtered environment, and uses the monotonic clock to enforce a deadline.
+
+## A runnable view: tiny's clocks, hostname, and environment
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+// tiny14 shows the configuration side of the OS: clocks, hostname, environment.
+func main() {
+	// Monotonic clock for measuring, wall clock for display.
+	start := time.Now()
+	wall := time.Now()
+
+	mono := time.Since(start) // uses CLOCK_MONOTONIC internally
+	fmt.Printf("monotonic elapsed since start: %v\n", mono)
+	fmt.Printf("wall-clock now: %s\n", wall.Format(time.RFC3339))
+
+	// Hostname via the kernel uname.
+	var uts unix.Utsname
+	if err := unix.Uname(&uts); err == nil {
+		fmt.Printf("hostname: %s\n", unix.ByteSliceToString(uts.Nodename[:]))
+	}
+
+	// Print only environment keys we care about, redacting secrets.
+	fmt.Println("filtered environment:")
+	for _, kv := range os.Environ() {
+		k := kv[:strings.IndexByte(kv, '=')+1]
+		if strings.HasPrefix(k, "TINY_") || strings.HasPrefix(k, "PATH=") {
+			if strings.Contains(k, "SECRET") || strings.Contains(k, "PASSWORD") || strings.Contains(k, "KEY") {
+				fmt.Printf("  %s<redacted>\n", k)
+			} else {
+				fmt.Printf("  %s\n", kv)
+			}
+		}
+	}
+
+	// Enforce a deadline using the monotonic clock.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	path := envOr("TINY_FILE", "message.txt")
+	if err := doWork(path, deadline); err != nil {
+		fmt.Fprintf(os.Stderr, "tiny: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func doWork(path string, deadline time.Time) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if time.Now().After(deadline) {
+		return fmt.Errorf("deadline exceeded before printing")
+	}
+	fmt.Print(string(data))
+	return nil
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+```
 
 ## Time appears simple until you measure
 
@@ -5716,15 +6766,15 @@ You can see which path a program uses with ordinary tools. `strace -e clock_gett
 
 ## Common misconceptions
 
-### “Changing an environment variable updates a running service.”
+### "Changing an environment variable updates a running service."
 
 It does not. The value is inherited at start. An already running process keeps what it got. You need to restart the service.
 
-### “A hostname proves which service I talked to.”
+### "A hostname proves which service I talked to."
 
 It is only a hint. A local name can collide or be changed. Prove identity with a certificate or with the platform's instance identity, not with a string comparison on the hostname.
 
-### “Wall-clock time is fine for timeouts.”
+### "Wall-clock time is fine for timeouts."
 
 It can be stepped. If you subtract two wall-clock times, the result can be negative or very large. Use monotonic time for deadlines and keep wall-clock time for display.
 
@@ -5734,15 +6784,72 @@ Time, hostname, and environment look small, but they sit on every request. Use w
 
 The habit to keep is to ask where each value comes from, whether it can change underneath you, and who the correct consumer is. Is the value for a person, for measuring, or for identity?
 
-## If you want to build this later
-
-Extend the inspection tool from the previous article. Add a mode that prints both clocks every half second and a mode that simulates a deadline with each clock. Add another mode that reads `/proc/<pid>/environ` and prints the keys, redacting anything that looks like a secret, and that prints `hostname`, `hostname -f`, and `machine-id` side by side.
-
-Run it in a VM where you can step the wall clock. The monotonic deadline should stay close to correct while the wall-clock deadline moves. Restart a child after changing the parent's environment and show that the old child still sees the old value while a new child sees the new one. The exercise makes it clear which values are live observations and which are one-time inputs.
+**Where this leaves us** — `tiny` now reports its monotonic and wall clocks, hostname, and filtered environment, and enforces a deadline on the monotonic clock. Next, Chapter 15 pins `tiny` to a CPU and measures what a context switch actually costs.
 
 ## Chapter 15 — CPU Scheduling and Context Switching
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 14 showed `tiny` reading the clocks and identity the kernel gave it; now we look at where the kernel runs `tiny`. The scheduler places its thread on a CPU, and pinning `tiny` to one core lets us measure what a context switch actually costs. The program below pins `tiny` with `sched_setaffinity` and compares a tight loop with one that yields.
+
+## A runnable view: tiny pinned and measured
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+// tiny15 pins itself to one CPU and compares a tight loop with a yielding loop
+// to show the cost of giving up the CPU (context switching).
+func main() {
+	// Pin to CPU 0 (or the first online CPU) using sched_setaffinity.
+	var set unix.CPUSet
+	set.Set(0)
+	if err := unix.SchedSetaffinity(0, &set); err != nil {
+		fmt.Fprintf(os.Stderr, "setaffinity: %v\n", err)
+	} else {
+		fmt.Println("tiny15: pinned to CPU 0")
+	}
+
+	// Report which CPU we actually run on.
+	cpu, _ := unix.SchedGetCPU()
+	fmt.Printf("tiny15: running on CPU %d\n", cpu)
+
+	const iters = 50_000_000
+
+	// Tight loop: never yields, stays on the CPU.
+	t0 := time.Now()
+	busy(iters)
+	tight := time.Since(t0)
+
+	// Yielding loop: sleeps briefly each iteration, forcing many switches.
+	t1 := time.Now()
+	yield(iters / 1000)
+	loose := time.Since(t1)
+
+	fmt.Printf("tight loop (%d iters): %v\n", iters, tight)
+	fmt.Printf("yielding loop (%d sleeps): %v\n", iters/1000, loose)
+	fmt.Printf("context-switch overhead ratio: %.1fx\n", float64(loose)/float64(tight))
+}
+
+func busy(n int) {
+	x := 0
+	for i := 0; i < n; i++ {
+		x += i
+	}
+	_ = x
+}
+
+func yield(n int) {
+	for i := 0; i < n; i++ {
+		time.Sleep(time.Microsecond) // gives up the CPU; scheduler switches
+	}
+}
+```
 
 ## The smallest unit the scheduler works with
 
@@ -5996,27 +7103,27 @@ They do not pin CPUs or raise priorities just because those knobs exist. A chang
 
 ## Common misconceptions
 
-### “The scheduler runs processes, not threads.”
+### "The scheduler runs processes, not threads."
 
 The scheduler runs individual threads. A process is the container with address space and resources, but the schedulable unit is the thread.
 
-### “A context switch copies all memory.”
+### "A context switch copies all memory."
 
 It saves and restores registers and execution state. It does not copy the whole address space, although changing address spaces can make the next accesses miss in the translation cache.
 
-### “More cores always fix scheduling.”
+### "More cores always fix scheduling."
 
 More cores help when CPU is the bottleneck, but locks, memory bandwidth, disk, and serial parts of the workload can still be the limit.
 
-### “A sleeping thread wastes CPU.”
+### "A sleeping thread wastes CPU."
 
 A sleeping thread is waiting and does not use a CPU. A loop that keeps checking again without waiting is the pattern that wastes CPU.
 
-### “Pinning always makes things faster.”
+### "Pinning always makes things faster."
 
 It can keep data close, but it can also keep work on a busy or distant CPU and prevent the scheduler from balancing a burst.
 
-### “Real-time priority guarantees real-time behavior.”
+### "Real-time priority guarantees real-time behavior."
 
 Priority helps choose who runs, but deadlines also depend on interrupts, memory, locks, and devices, not just the scheduling class.
 
@@ -6024,13 +7131,65 @@ Priority helps choose who runs, but deadlines also depend on interrupts, memory,
 
 The kernel schedules threads, not processes. A thread can be running, runnable and waiting for a CPU, or sleeping and waiting for something else. Preemptive scheduling lets the kernel interrupt a running thread so others get a turn. A context switch saves and restores state, and it often loses some cache warmth. Many runnable threads cause more switches and more competition for locks without adding useful throughput. The right way to diagnose is to look at thread states, CPU usage, queue length, switching, lock waits, and latency together, and to change affinity or priority only to fix a specific observation.
 
-## If you want to build this later
-
-Write a small program that can start a chosen number of threads that either do computation or mostly sleep. Measure how long it takes, how much CPU it uses, and how often it switches and migrates. Start with a number close to the number of CPUs and then increase it. Add a shared lock that all workers use, then change the program so each worker touches less shared data. Compare the default scheduler with a run where you pin threads to CPUs. The goal is to see the difference between running, runnable, and sleeping, and to see when adding concurrency turns into overhead.
-
+**Where this leaves us** — `tiny` is now pinned to a CPU and we have measured the gap between a tight loop and one that yields. Next, Chapter 16 sets `tiny`'s resource limits and shows where the OOM killer draws the line.
 ## Chapter 16 — Linux Resource Limits and the OOM Killer
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 15 pinned `tiny` to a CPU and measured the price of switching away from it; this chapter bounds what `tiny` may consume. We lower `tiny`'s own file-descriptor limit to force exhaustion, and read the cgroup memory files that decide when the OOM killer steps in. The program below sets `RLIMIT_NOFILE` to a small value and then tries to open many files, printing the resulting errors.
+
+## A runnable view: tiny hitting its limits
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"golang.org/x/sys/unix"
+)
+
+// tiny16 lowers its own file-descriptor limit, then tries to exceed it, and
+// also reads its cgroup memory limits if available. The errors are the lesson.
+func main() {
+	// Lower RLIMIT_NOFILE to a small value to force exhaustion quickly.
+	var lim unix.Rlimit
+	lim.Cur = 8
+	lim.Max = 8
+	if err := unix.Setrlimit(unix.RLIMIT_NOFILE, &lim); err != nil {
+		fmt.Fprintf(os.Stderr, "setrlimit: %v\n", err)
+	}
+	fmt.Println("tiny16: lowered RLIMIT_NOFILE to 8")
+
+	// Try to open many files; we expect EMFILE once the limit is hit.
+	var files []*os.File
+	for i := 0; i < 30; i++ {
+		f, err := os.Open("/dev/null")
+		if err != nil {
+			fmt.Printf("open #%d failed: %v\n", i, err)
+			break
+		}
+		files = append(files, f)
+	}
+	fmt.Printf("tiny16: managed to keep %d fds open\n", len(files))
+	for _, f := range files {
+		f.Close()
+	}
+
+	// Show the cgroup memory view if this kernel exposes v2 files.
+	readCgroupMemory("/sys/fs/cgroup/memory.max")
+	readCgroupMemory("/sys/fs/cgroup/memory.current")
+	readCgroupMemory("/sys/fs/cgroup/memory.peak")
+}
+
+func readCgroupMemory(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("%s: unavailable (%v)\n", path, err)
+		return
+	}
+	fmt.Printf("%s = %s", path, string(data))
+}
+```
 
 ## Why limits are needed
 
@@ -6294,27 +7453,27 @@ A limit chosen from one successful test is rarely enough, because concurrency, d
 
 ## Common misconceptions
 
-### “The OOM killer allocates memory.”
+### "The OOM killer allocates memory."
 
 It does not. It is the recovery step that runs after normal reclaim has failed. Allocation, reclaim, and swapping happen first.
 
-### “The killed program must have had a leak.”
+### "The killed program must have had a leak."
 
 The chosen task is often the one that happened to ask for memory when the system ran out, while another program slowly grew beforehand. Logs and history are needed to know the cause.
 
-### “A container limit protects the whole host.”
+### "A container limit protects the whole host."
 
 It protects that group, but the host still needs memory for the kernel and other work. The host can run out even when each program stays below its own limit.
 
-### “More swap always prevents OOM.”
+### "More swap always prevents OOM."
 
 Swap can hold some anonymous memory, but it is slower than RAM and it cannot fix unbounded growth or every kind of pressure. Heavy swapping can make the machine unusable before any kill happens.
 
-### “`memory.high` and `memory.max` are the same.”
+### "`memory.high` and `memory.max` are the same."
 
 `memory.high` is where the group is throttled and reclaim is forced. `memory.max` is the hard ceiling where tasks inside the group may be ended.
 
-### “Per-process limits are enough for a service.”
+### "Per-process limits are enough for a service."
 
 A service is often many programs and replicas that share a resource. Containing it usually needs group accounting as well as per-process limits.
 
@@ -6322,20 +7481,16 @@ A service is often many programs and replicas that share a resource. Containing 
 
 Limits keep a program from taking more than it should, and they create a clear boundary where the program must decide what to do. Per-process limits like `RLIMIT` bound one program, while control groups bound a set of programs together, which is how services and containers are contained. Under pressure the kernel reclaims first and may throttle a group at `memory.high`. That hard ceiling at `memory.max` or a whole-machine shortage can trigger the OOM killer, which is a last resort that keeps the machine alive but does not fix the workload. Reliable services use bounded caches and queues, limit concurrency, have a clear policy at the boundary, and watch usage, peaks, pressure, and kill counters.
 
-## If you want to build this later
-
-Make a small laboratory on Linux for limits. Write programs that open files until `RLIMIT_NOFILE` is hit, create threads until a limit is hit, and allocate memory inside a small cgroup. Note the errors you get, look at `/proc`, and compare a per-process limit with a group limit. For the memory experiment, use a disposable workload and a conservative limit, watch `memory.current`, `memory.peak`, and `memory.events`, and make the program drop its cache or reject work when pressure appears. The goal is to see how containment behaves and why the killer is not a normal control mechanism.
-
+**Where this leaves us** — With limits and the OOM boundary, `tiny` is now a fully accounted process the kernel schedules, isolates, and contains. In Part III it stops being a running process and becomes machine instructions: Chapter 17 opens the executable and shows how the CPU actually executes `tiny`.
 # Part III — Hardware and Computer Architecture
 
-Hardware is the reason the operating system exists. It executes instructions, keeps data close to execution, communicates between cores, and enforces privilege.
+Hardware is the reason the operating system exists, and in Part III the running example — the tiny command-line program that reads `TINY_FILE` and prints it — stops being a process abstraction and becomes machine instructions executing on the CPU. The compiler turned tiny's few lines into an instruction stream, and now we follow that stream down to the metal: how a core fetches, decodes, and retires instructions (Ch17), how hardware counters expose their cost in cycles and instructions (Ch18), how cache locality decides whether those instructions wait on memory (Ch19), how atomic hardware lets many cores share tiny's state without corruption (Ch20), how traps and interrupts catch the faults and device events tiny triggers (Ch21), and how the CPU privilege gate enforces every crossing between tiny's user mode and the kernel (Ch22). By the end, tiny is no longer just a program you run; it is a concrete path from source bytes through the pipeline into silicon.
 
 ---
 
-
 ## Chapter 17 — How a CPU Executes Instructions
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 16 left tiny at the mercy of its resource limits, where the OOM killer could end the process for consuming too much memory. Now we go one level down: tiny is no longer an abstract process but a stream of machine instructions the CPU fetches, decodes, and executes. This chapter follows those instructions from bytes in memory to retired work.
 
 ## From source code to instructions
 
@@ -6409,7 +7564,7 @@ The instruction set architecture, or ISA, is the contract visible to software. I
 
 The microarchitecture is the internal design used to implement that contract. It includes the pipeline, caches, branch predictor, execution units, instruction decoder, register renaming machinery, and retirement logic.
 
-Two processors can implement the same ISA and run the same executable while having very different performance. One may have a wider pipeline, better branch prediction, larger caches, or more execution units. This is why “the program uses x86-64” does not tell you how fast it will run on every x86-64 processor.
+Two processors can implement the same ISA and run the same executable while having very different performance. One may have a wider pipeline, better branch prediction, larger caches, or more execution units. This is why "the program uses x86-64" does not tell you how fast it will run on every x86-64 processor.
 
 The ISA tells the compiler what behavior is allowed. The microarchitecture determines how efficiently a particular sequence of allowed instructions runs.
 
@@ -6523,7 +7678,7 @@ This is speculative execution. If the prediction is correct, the CPU has saved t
 
 Predictable branches are usually easier for the processor than branches whose outcome changes in an irregular pattern. This does not mean that every branch should be removed or replaced with clever arithmetic. Branchless code can introduce extra operations, harder-to-read logic, or memory accesses that are worse than a well-predicted branch. Measure the real workload.
 
-Speculation is also relevant to security. A CPU may perform work speculatively even though the architectural result will later be discarded. Some historical vulnerabilities showed that discarded speculative work could influence microarchitectural state, such as caches, in ways observable by an attacker. The security details belong in the later security articles, but the important foundation is that “not architecturally committed” does not always mean “had no physical effect inside the processor.”
+Speculation is also relevant to security. A CPU may perform work speculatively even though the architectural result will later be discarded. Some historical vulnerabilities showed that discarded speculative work could influence microarchitectural state, such as caches, in ways observable by an attacker. The security details belong in the later security articles, but the important foundation is that "not architecturally committed" does not always mean "had no physical effect inside the processor."
 
 ## Loads, stores, and why memory matters
 
@@ -6577,55 +7732,85 @@ The CPU continues to execute instructions according to its architecture. The ker
 
 The operating system does not normally inspect every instruction or decide the order of independent instructions inside a thread. That work belongs to the CPU. This boundary is important: the scheduler controls thread-level execution, while the processor controls instruction-level execution within the running thread.
 
-## A performance example: dependency versus available parallelism
-
-Compare these two loops conceptually:
-
-```c
-// One long dependency chain.
-for (size_t i = 0; i < n; i++) {
-    total = total + values[i];
-}
-
-// Several partial sums create more independent work.
-for (size_t i = 0; i < n; i += 4) {
-    sum0 += values[i];
-    sum1 += values[i + 1];
-    sum2 += values[i + 2];
-    sum3 += values[i + 3];
-}
-```
-
-The second form gives the compiler and CPU several partial-sum chains instead of forcing every addition to wait for the previous addition. The final partial sums still need to be combined, but much of the loop has more instruction-level parallelism.
-
-This transformation is not automatically better in every situation. The loop may be limited by memory bandwidth, the values may not be safely readable in groups of four, or the compiler may already perform the transformation. The engineering method is to inspect the generated code and measure representative input rather than changing code based only on intuition.
-
 ## Seeing instructions and measuring behavior
 
-A small experiment can connect the concepts in this article without requiring a large project. Create a program that performs arithmetic, branches over predictable and unpredictable data, and reads a large array.
+The cleanest way to connect source to instructions is to take the real `tiny` program and disassemble it. Here is the exact source we have carried through the book:
 
-Compile it with debug information and optimization enabled:
+```go
+// tiny.go — the tiny core we follow into machine code.
+// Build: go build -o tiny .
+// Run:   TINY_FILE=message.txt ./tiny
+package main
 
-```bash
-cc -O2 -g example.c -o example
+import (
+    "fmt"
+    "os"
+)
+
+func main() {
+    path := os.Getenv("TINY_FILE")
+    if path == "" {
+        path = "message.txt"
+    }
+    data, err := os.ReadFile(path)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
+        os.Exit(1)
+    }
+    fmt.Print(string(data))
+}
 ```
 
-Disassemble the executable:
+Build it and dump the machine code for `main.main`:
 
 ```bash
-objdump -d -Mintel example
+go build -o tiny .
+go tool objdump -s "main.main" tiny
+```
+
+A trimmed `amd64` disassembly, with the key instructions annotated. Exact addresses and register choices vary with the toolchain and optimization level, but the structure is what matters:
+
+```asm
+TEXT main.main(SB) /home/you/tiny.go
+  tiny.go:11   LEAQ type.string(SB), AX     ; build the "TINY_FILE" argument
+  tiny.go:11   MOVQ $TINY_FILE_len(SB), BX  ; its length
+  tiny.go:11   CALL os.Getenv(SB)           ; the env lookup — a CALL into the runtime
+  tiny.go:12   MOVQ 8(SP), CX               ; CX = returned string pointer (path)
+  tiny.go:12   MOVQ 16(SP), DX              ; DX = returned string length
+  tiny.go:13   TESTQ DX, DX                 ; is the length zero?
+  tiny.go:13   JNE   use_path               ; if non-empty, skip the default
+  tiny.go:14   LEAQ go.string."message.txt"(SB), CX  ; load the default string
+  tiny.go:14   MOVQ $11, DX                 ; its length is 11
+use_path:
+  tiny.go:16   CALL os.ReadFile(SB)         ; read the file — another CALL across the ABI
+  tiny.go:17   MOVBL 24(SP), AX             ; load the returned error flag
+  tiny.go:17   TESTB AL, AL                 ; check: was there an error?
+  tiny.go:17   JEQ   print_data             ; if err == nil, skip the error path
+  tiny.go:18   CALL fmt.Fprintf(SB)         ; error branch: report and ...
+  tiny.go:19   CALL os.Exit(SB)             ; ... exit(1)
+print_data:
+  tiny.go:21   CALL fmt.Print(SB)           ; success branch: print the contents
+  tiny.go:21   RET
+```
+
+The source line `path := os.Getenv("TINY_FILE")` became a `CALL os.Getenv` plus register moves for the returned string. The `if path == ""` became a `TESTQ`/`JNE` pair: compare the length, then branch if not equal. `os.ReadFile` is another `CALL`, and the `if err != nil` became a `TESTB`/`JEQ`. This is the promised connection: a few readable lines become loads, calls, compares, and branches. On ARM64 the same structure appears with `R0`/`R1` and a `BL`/`B.EQ` pair instead of `CALL`/`JEQ`.
+
+On Linux you can also use the system disassembler:
+
+```bash
+objdump -d -Mintel tiny | grep -A 40 '<main.main>'
 ```
 
 Use a debugger when you want to stop at a function and inspect registers or the instruction pointer:
 
 ```bash
-gdb ./example
+gdb ./tiny
 ```
 
-On Linux, `perf stat` can report hardware and software counters:
+`perf stat` can report hardware and software counters for the same binary:
 
 ```bash
-perf stat -e cycles,instructions,branches,branch-misses,cache-misses ./example
+perf stat -e cycles,instructions,branches,branch-misses,cache-misses ./tiny
 ```
 
 Counter names and availability depend on the processor and operating system. Treat the output as evidence about one machine and one workload, not as a universal constant. Useful questions include whether the program is retiring many instructions per cycle, whether branch misses are unusually high, and whether cache misses are contributing to stalls.
@@ -6668,17 +7853,17 @@ Systems engineers use all three because each view hides something important.
 
 ## Common misconceptions
 
-**“The CPU executes one line of source code at a time.”** Source lines are not CPU instructions. One source statement can become many instructions, several statements can be optimized together, and some statements can disappear completely.
+**"The CPU executes one line of source code at a time."** Source lines are not CPU instructions. One source statement can become many instructions, several statements can be optimized together, and some statements can disappear completely.
 
-**“A higher clock speed always means a faster program.”** Clock speed describes cycles per second, not how much useful work completes per cycle. Pipeline stalls, branch mispredictions, cache misses, dependencies, and execution-unit limits also matter.
+**"A higher clock speed always means a faster program."** Clock speed describes cycles per second, not how much useful work completes per cycle. Pipeline stalls, branch mispredictions, cache misses, dependencies, and execution-unit limits also matter.
 
-**“Out-of-order execution means the program runs in a different order.”** Internal execution can be reordered, but the processor preserves the architectural behavior required by the ISA and retires results carefully.
+**"Out-of-order execution means the program runs in a different order."** Internal execution can be reordered, but the processor preserves the architectural behavior required by the ISA and retires results carefully.
 
-**“RISC is fast and CISC is slow.”** These labels describe ISA design traditions. Modern performance depends on the complete implementation, compiler output, workload, memory behavior, and processor design.
+**"RISC is fast and CISC is slow."** These labels describe ISA design traditions. Modern performance depends on the complete implementation, compiler output, workload, memory behavior, and processor design.
 
-**“A branchless rewrite is automatically faster.”** Removing a branch can help when prediction is poor, but it can also add instructions or memory work. Measure both versions on realistic input.
+**"A branchless rewrite is automatically faster."** Removing a branch can help when prediction is poor, but it can also add instructions or memory work. Measure both versions on realistic input.
 
-**“A memory access has one predictable cost.”** The cost depends on where the data is found, whether the access is dependent on earlier work, whether other cores are modifying it, and whether the access causes translation or cache misses.
+**"A memory access has one predictable cost."** The cost depends on where the data is found, whether the access is dependent on earlier work, whether other cores are modifying it, and whether the access causes translation or cache misses.
 
 ## Summary
 
@@ -6686,15 +7871,10 @@ The CPU executes an architectural instruction stream, but it does so using a muc
 
 The key question is whether the processor has useful independent work available. A program slows down when instructions depend on a long chain, wait for memory, compete for an execution resource, or repeatedly mispredict control flow. The only reliable way to understand a real case is to connect the source code, the generated instructions, and measurements.
 
-## If you want to build this later
-
-Build a small **CPU behavior laboratory** in C. Include benchmarks for a dependency chain, several independent accumulators, predictable branches, unpredictable branches, and sequential versus scattered array access. Add a command-line option for the input size.
-
-For each benchmark, record the runtime, inspect the disassembly, and collect `perf stat` counters when Linux is available. Write a short explanation for every difference you observe. The purpose is not to create a production benchmark suite; it is to train yourself to explain CPU behavior using evidence instead of only source-level intuition.
-
+**Where this leaves us** — tiny is now concrete as an instruction stream: a `CALL` to fetch its environment variable, a compare-and-branch for the default path, and a `CALL` to read its file. The next chapter gives those instructions a cost — hardware counters that count how many retired and how many cycles they burned.
 ## Chapter 18 — CPU Performance and Hardware Counters
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 17 showed tiny as a sequence of machine instructions, but instructions alone say nothing about speed. This chapter adds the processor's own counters, so we can ask how many instructions tiny's read loop actually retires and how many cycles they cost.
 
 ## What performance actually means
 
@@ -6817,7 +7997,7 @@ flowchart LR
     H --> I
 ```
 
-An explanation such as “IPC is low, so the cache is the problem” is a hypothesis, not a conclusion.
+An explanation such as "IPC is low, so the cache is the problem" is a hypothesis, not a conclusion.
 
 ## Branch instructions and branch misses
 
@@ -6841,7 +8021,7 @@ Do not treat every branch as a problem. Branches can avoid unnecessary work, pro
 
 The CPU uses caches to keep recently or frequently used data close to the execution units. A cache hit finds the requested data at that level. A cache miss requires looking in a slower level or in main memory.
 
-Cache counters are easy to misunderstand. “Cache miss” may refer to a particular cache level, a particular type of access, or an event whose meaning depends on the processor. A miss does not always equal a long stall: the request may be served by another cache, overlap with independent work, or be prefetched.
+Cache counters are easy to misunderstand. "Cache miss" may refer to a particular cache level, a particular type of access, or an event whose meaning depends on the processor. A miss does not always equal a long stall: the request may be served by another cache, overlap with independent work, or be prefetched.
 
 Still, cache-related measurements are valuable when combined with code and memory-access patterns. Sequential traversal often benefits from spatial locality, meaning nearby addresses are used close together in time. Reusing the same data benefits from temporal locality, meaning the same data is used again before it leaves the cache.
 
@@ -6867,7 +8047,7 @@ If the front end cannot provide decoded instructions quickly enough, execution u
 
 If the back end cannot execute the available instructions quickly enough, the limitation may be arithmetic throughput, load/store capacity, memory latency, dependency chains, or a busy execution unit.
 
-This separation helps avoid vague explanations. “The CPU is slow” is not a diagnosis. A better statement is “the workload is spending cycles waiting for data dependencies” or “the front end is repeatedly redirected by unpredictable branches,” provided measurements support it.
+This separation helps avoid vague explanations. "The CPU is slow" is not a diagnosis. A better statement is "the workload is spending cycles waiting for data dependencies" or "the front end is repeatedly redirected by unpredictable branches," provided measurements support it.
 
 ## Why one counter is never the whole story
 
@@ -6914,79 +8094,110 @@ For a process that is already running, `perf stat -p PID` can attach to it. Prod
 
 ## A small benchmark that teaches useful lessons
 
-The following program creates three different kinds of work. The first loop contains a serial dependency chain. The second provides several independent accumulators. The third makes branch outcomes depend on input data.
+The following Go program opens two real hardware counters with `perf_event_open` and counts `INSTRUCTIONS` and `CPU_CYCLES` for a tiny-style read loop. It then prints the totals and the resulting IPC. Run it against the same `TINY_FILE` that tiny uses, and cross-check with `perf stat ./tiny`.
 
-```c
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
+```go
+// perf_tiny.go — count INSTRUCTIONS and CYCLES for a tiny-style read loop.
+// Requires: go get golang.org/x/sys/unix
+// Build:    go build -o perf_tiny .
+// Run:      TINY_FILE=message.txt ./perf_tiny
+//
+// Opens two hardware performance counters with perf_event_open, runs a
+// tiny-style read loop (read the file N times), and prints the totals.
+package main
 
-static uint64_t serial_sum(const uint32_t *values, size_t n) {
-    uint64_t sum = 0;
-    for (size_t i = 0; i < n; i++) {
-        sum += values[i];
-    }
-    return sum;
+import (
+	"fmt"
+	"os"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
+)
+
+const iterations = 2000
+
+// openCounter opens one hardware event and returns its file descriptor.
+func openCounter(typ, config int) int {
+	attr := unix.PerfEventAttr{
+		Type:          uint32(typ),
+		Config:        uint64(config),
+		ExcludeKernel: 1, // count only tiny's own user-space work
+		ExcludeHv:     1,
+	}
+	fd, _, errno := unix.Syscall6(unix.SYS_PERF_EVENT_OPEN,
+		uintptr(unsafe.Pointer(&attr)), 0, 0, 0, 0, 0)
+	if errno != 0 {
+		fmt.Fprintf(os.Stderr, "perf_event_open: %v\n", errno)
+		os.Exit(1)
+	}
+	return int(fd)
 }
 
-static uint64_t parallel_sum(const uint32_t *values, size_t n) {
-    uint64_t a = 0, b = 0, c = 0, d = 0;
-    size_t i = 0;
-
-    for (; i + 3 < n; i += 4) {
-        a += values[i];
-        b += values[i + 1];
-        c += values[i + 2];
-        d += values[i + 3];
-    }
-
-    for (; i < n; i++) {
-        a += values[i];
-    }
-
-    return a + b + c + d;
+// readCounter reads the 8-byte counter value.
+func readCounter(fd int) uint64 {
+	var val uint64
+	if _, err := unix.Read(fd, (*[8]byte)(unsafe.Pointer(&val))[:]); err != nil {
+		fmt.Fprintf(os.Stderr, "read counter: %v\n", err)
+		os.Exit(1)
+	}
+	return val
 }
 
-static uint64_t branch_work(const uint32_t *values, size_t n) {
-    uint64_t result = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (values[i] & 1u) {
-            result += values[i];
-        }
-    }
-    return result;
+// tinyRead is the loop whose cost we measure: tiny reads TINY_FILE each time.
+func tinyRead(path string) {
+	for i := 0; i < iterations; i++ {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
+			os.Exit(1)
+		}
+		// Touch the data so the compiler cannot delete the call.
+		if len(data) == 0 && i == -1 {
+			fmt.Print("")
+		}
+	}
 }
 
-int main(void) {
-    const size_t n = 64 * 1024 * 1024;
-    uint32_t *values = malloc(n * sizeof(*values));
-    if (values == NULL) {
-        return 1;
-    }
+func main() {
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
 
-    for (size_t i = 0; i < n; i++) {
-        values[i] = (uint32_t)(i * 2654435761u);
-    }
+	fdInstr := openCounter(unix.PERF_TYPE_HARDWARE, unix.PERF_COUNT_HW_INSTRUCTIONS)
+	fdCycles := openCounter(unix.PERF_TYPE_HARDWARE, unix.PERF_COUNT_HW_CPU_CYCLES)
 
-    printf("%llu\n", (unsigned long long)serial_sum(values, n));
-    printf("%llu\n", (unsigned long long)parallel_sum(values, n));
-    printf("%llu\n", (unsigned long long)branch_work(values, n));
+	// Reset and enable both counters, run the loop, then disable.
+	unix.IoctlSetInt(fdInstr, unix.PERF_EVENT_IOC_RESET, 0)
+	unix.IoctlSetInt(fdCycles, unix.PERF_EVENT_IOC_RESET, 0)
+	unix.IoctlSetInt(fdInstr, unix.PERF_EVENT_IOC_ENABLE, 0)
+	unix.IoctlSetInt(fdCycles, unix.PERF_EVENT_IOC_ENABLE, 0)
 
-    free(values);
-    return 0;
+	tinyRead(path)
+
+	unix.IoctlSetInt(fdInstr, unix.PERF_EVENT_IOC_DISABLE, 0)
+	unix.IoctlSetInt(fdCycles, unix.PERF_EVENT_IOC_DISABLE, 0)
+
+	instr := readCounter(fdInstr)
+	cycles := readCounter(fdCycles)
+	_ = unix.Close(fdInstr)
+	_ = unix.Close(fdCycles)
+
+	ipc := float64(instr) / float64(cycles)
+	fmt.Printf("iterations  : %d\n", iterations)
+	fmt.Printf("instructions: %d\n", instr)
+	fmt.Printf("cycles      : %d\n", cycles)
+	fmt.Printf("IPC         : %.3f\n", ipc)
 }
 ```
 
-This is an educational benchmark, not a laboratory-quality benchmark suite. The compiler may transform the functions, the array may not fit in cache, and the memory allocation and initialization can affect the run. Compile it, inspect the assembly, and measure each function separately if you want a cleaner comparison.
+Cross-check the same idea without writing code by running the original `tiny` binary under `perf`:
 
 ```bash
-cc -O2 -g benchmark.c -o benchmark
-perf stat -e cycles,instructions,branches,branch-misses,cache-misses ./benchmark
-objdump -d -Mintel benchmark > benchmark.asm
+perf stat -e cycles,instructions,branches,branch-misses,cache-misses ./tiny
 ```
 
-One important lesson is that the compiler may already turn the second loop into a vectorized implementation. If you want to understand what happened, check the disassembly instead of assuming that the source loop is the final loop.
+One important lesson is that the compiler may already turn the read loop into a vectorized implementation, and that opening the file once versus `iterations` times changes whether you are measuring I/O or instruction retirement. If you want a cleaner comparison, factor the loop so setup costs do not dominate, and repeat runs under equivalent conditions.
 
 ## Benchmarking without fooling yourself
 
@@ -7042,7 +8253,7 @@ Counters are useful in production, but continuous collection has costs and opera
 
 Teams often use a combination of approaches. They use application metrics for request latency and throughput, system metrics for CPU utilization and load, sampled profiles for hot functions, and targeted hardware-counter runs during an investigation or performance test.
 
-The most useful production question is usually not “what is the CPU doing globally?” It is “which service, endpoint, workload, or deployment changed, and what evidence explains the change?” Correlate CPU measurements with version, input shape, traffic level, and latency percentiles.
+The most useful production question is usually not "what is the CPU doing globally?" It is "which service, endpoint, workload, or deployment changed, and what evidence explains the change?" Correlate CPU measurements with version, input shape, traffic level, and latency percentiles.
 
 ## Interview definitions
 
@@ -7074,17 +8285,17 @@ The most useful production question is usually not “what is the CPU doing glob
 
 ## Common misconceptions
 
-**“More IPC is always better.”** Higher IPC can be good, but executing fewer total instructions may be a larger improvement. IPC must be considered with instruction count and total cycles.
+**"More IPC is always better."** Higher IPC can be good, but executing fewer total instructions may be a larger improvement. IPC must be considered with instruction count and total cycles.
 
-**“A cache miss counter directly gives the time lost to cache misses.”** It reports an event according to the processor's definition. Misses can overlap, have different service costs, and affect only some instructions.
+**"A cache miss counter directly gives the time lost to cache misses."** It reports an event according to the processor's definition. Misses can overlap, have different service costs, and affect only some instructions.
 
-**“One benchmark run proves the optimization works.”** One run cannot separate the change from frequency variation, background work, cache state, scheduling, or measurement noise.
+**"One benchmark run proves the optimization works."** One run cannot separate the change from frequency variation, background work, cache state, scheduling, or measurement noise.
 
-**“CPU utilization tells you whether the CPU is the bottleneck.”** High utilization suggests the process is using available CPU time, but it does not identify whether the code is efficiently using the CPU. Low utilization may still coexist with latency caused by one busy core or waiting on another resource.
+**"CPU utilization tells you whether the CPU is the bottleneck."** High utilization suggests the process is using available CPU time, but it does not identify whether the code is efficiently using the CPU. Low utilization may still coexist with latency caused by one busy core or waiting on another resource.
 
-**“The compiler output is stable because the source code is unchanged.”** Compiler version, flags, target CPU options, link-time optimization, libraries, and profile information can all change generated instructions.
+**"The compiler output is stable because the source code is unchanged."** Compiler version, flags, target CPU options, link-time optimization, libraries, and profile information can all change generated instructions.
 
-**“Hardware counters are exact and universal.”** Event definitions, availability, skid, multiplexing, virtualization, and kernel support vary by processor and environment. Treat counter output as evidence with a measurement context.
+**"Hardware counters are exact and universal."** Event definitions, availability, skid, multiplexing, virtualization, and kernel support vary by processor and environment. Treat counter output as evidence with a measurement context.
 
 ## Summary
 
@@ -7092,15 +8303,10 @@ CPU performance is not explained by clock speed alone. A useful first model is i
 
 The disciplined approach is to measure before changing code, form a specific hypothesis about where time goes, select counters that can test it, look at the generated instructions, and repeat the experiment. Counters do not replace understanding; they make your explanation testable.
 
-## If you want to build this later
-
-Build a **microbenchmark and counter report tool**. It should run several small workloads, measure wall-clock time, and invoke or document the relevant `perf stat` commands. For each workload, report instructions, cycles, IPC, branches, branch misses, and cache events when available.
-
-Then write a short report answering three questions for every workload: what was the limiting factor, what evidence supports that conclusion, and what measurement could still prove you wrong? That final question is important. Good performance engineering is not finding a counter that agrees with your first guess; it is reducing uncertainty until the bottleneck is clear.
-
+**Where this leaves us** — with perf counters, tiny's instruction stream is now measurable: instructions, cycles, IPC, branch and cache events. The next chapter explains why two instruction streams with the same count can cost very different amounts of time — the cache and memory locality that decide whether each load is a hit or a stall.
 ## Chapter 19 — CPU Caches and Memory Locality
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 18 counted tiny's instructions and cycles, yet the same instruction count can hide very different runtimes. This chapter shows why: where tiny's data lives in the cache hierarchy decides whether each load is a fast hit or a slow trip to memory.
 
 ## Why caches exist
 
@@ -7128,7 +8334,7 @@ If a program loads one byte from an address, the CPU may bring the entire contai
 ```text
 Cache line:  [byte 0 ... byte 63]
 Address:                  ^
-                       requested byte
+                        requested byte
 ```
 
 This is the hardware reason sequential access is often efficient. The program requests one element, and the cache brings nearby elements along with it. It is also why touching one byte per large, widely separated region can waste much of every fetched line.
@@ -7140,9 +8346,9 @@ At a high level, a cache divides an address into parts. The cache uses some bits
 ```text
 Address bits:
     [              tag ][ set index ][ line offset ]
-                              |              |
-                              |              +-- byte inside the cache line
-                              +----------------- cache set to inspect
+                               |              |
+                               |              +-- byte inside the cache line
+                               +----------------- cache set to inspect
 ```
 
 The exact bit layout depends on the cache size, line size, number of sets, and associativity. A set-associative cache allows several lines with the same set index to exist in one set. If too many active addresses map to the same set, they can evict one another even when the total working data could theoretically fit in the cache. This behavior is called conflict pressure.
@@ -7247,7 +8453,7 @@ struct Particles {
 
 Now a loop that updates positions can read the position arrays without loading unrelated fields. This layout can improve locality and vectorization, but it may make operations that need an entire particle less convenient. The right choice depends on the dominant access patterns.
 
-The general rule is not “arrays are always better than structures.” The rule is: organize data around the operations that are actually hot. A layout that is excellent for one access pattern may be poor for another.
+The general rule is not "arrays are always better than structures." The rule is: organize data around the operations that are actually hot. A layout that is excellent for one access pattern may be poor for another.
 
 ## Working sets and cache capacity
 
@@ -7262,7 +8468,7 @@ flowchart LR
     F --> G[Lower effective throughput]
 ```
 
-There is not one global “cache-friendly” size. L1, L2, and shared caches have different capacities. Other threads, the operating system, and unrelated processes also consume cache capacity. A data set that fits in L2 on an otherwise idle machine may not behave the same way under a real multi-threaded workload.
+There is not one global "cache-friendly" size. L1, L2, and shared caches have different capacities. Other threads, the operating system, and unrelated processes also consume cache capacity. A data set that fits in L2 on an otherwise idle machine may not behave the same way under a real multi-threaded workload.
 
 Blocking, also called tiling, is a technique for processing a large problem in smaller pieces so that a piece stays in cache while it is reused. Matrix multiplication is a classic example. Instead of operating on an entire large matrix at once, the algorithm works on smaller blocks.
 
@@ -7387,39 +8593,83 @@ Production performance is therefore shaped by both the algorithm and the data mo
 
 ## Seeing locality with a benchmark
 
-Here is a small C example that compares a contiguous walk with a strided walk:
+The following Go program is a tiny-style scanner. It builds a 2D matrix stored row-major (as Go `[rows][cols]`) and scans it twice: once in row-major order, which walks adjacent memory, and once in column-major order, which strides across rows and touches many more cache lines. It times both and prints the delta.
 
-```c
-#include <stddef.h>
-#include <stdint.h>
+```go
+// locality_tiny.go — row-major vs column-major scan of a 2D matrix.
+// Build: go build -o locality_tiny .
+// Run:  ./locality_tiny
+//
+// The matrix is stored row-major (Go [rows][cols]). Scanning it in row order
+// walks adjacent memory; scanning it in column order strides across rows and
+// touches many more cache lines. We time both and print the slowdown.
+package main
 
-uint64_t sequential_sum(const uint64_t *values, size_t n) {
-    uint64_t sum = 0;
-    for (size_t i = 0; i < n; i++) {
-        sum += values[i];
-    }
-    return sum;
+import (
+	"fmt"
+	"time"
+)
+
+const (
+	rows = 8000
+	cols = 8000
+)
+
+// rowMajor scans in row order: adjacent elements are adjacent in memory.
+func rowMajor(m *[rows][cols]int64) int64 {
+	var sum int64
+	for r := 0; r < rows; r++ {
+		for c := 0; c < cols; c++ {
+			sum += m[r][c]
+		}
+	}
+	return sum
 }
 
-uint64_t strided_sum(const uint64_t *values, size_t n, size_t stride) {
-    uint64_t sum = 0;
-    for (size_t i = 0; i < n; i += stride) {
-        sum += values[i];
-    }
-    return sum;
+// colMajor scans in column order: each step jumps a full row, hurting locality.
+func colMajor(m *[rows][cols]int64) int64 {
+	var sum int64
+	for c := 0; c < cols; c++ {
+		for r := 0; r < rows; r++ {
+			sum += m[r][c]
+		}
+	}
+	return sum
+}
+
+func main() {
+	var m [rows][cols]int64
+	for r := 0; r < rows; r++ {
+		for c := 0; c < cols; c++ {
+			m[r][c] = int64(r + c)
+		}
+	}
+
+	t0 := time.Now()
+	a := rowMajor(&m)
+	rowDur := time.Since(t0)
+
+	t1 := time.Now()
+	b := colMajor(&m)
+	colDur := time.Since(t1)
+
+	fmt.Printf("row-major : %v\n", rowDur)
+	fmt.Printf("col-major : %v\n", colDur)
+	fmt.Printf("slowdown  : %.2fx\n", float64(colDur)/float64(rowDur))
+	// Use both results so the compiler keeps both loops.
+	fmt.Printf("checksum  : %d %d\n", a, b)
 }
 ```
 
-Compile with optimization and make sure the returned result is used so the compiler cannot remove the loop:
+Compile with optimization and run it:
 
 ```bash
-cc -O2 -g locality.c -o locality
-perf stat -e cycles,instructions,cache-references,cache-misses ./locality
+go build -o locality_tiny .
+./locality_tiny
+perf stat -e cycles,instructions,cache-references,cache-misses ./locality_tiny
 ```
 
-A useful experiment varies the array size. Very small arrays may fit in a cache and show little difference. Larger arrays can expose memory latency and bandwidth. Vary the stride as well. A stride of one uses every element; a large stride may use only a small portion of each fetched line.
-
-Do not expect the same numbers on every machine. Cache sizes, line sizes, prefetchers, memory channels, compiler vectorization, and operating-system behavior differ. The purpose is to observe the relationship, not memorize a particular timing.
+A useful experiment varies the array size. Very small arrays may fit in a cache and show little difference. Larger arrays can expose memory latency and bandwidth. The column-major scan usually shows a large slowdown because it fetches a new cache line for nearly every element while the row-major scan reuses each fetched line across the whole row. Do not expect the same numbers on every machine; cache sizes, line sizes, prefetchers, memory channels, and compiler vectorization differ. The purpose is to observe the relationship, not memorize a particular timing.
 
 ## How to investigate a cache-related slowdown
 
@@ -7471,17 +8721,17 @@ Then test one change at a time. Reorder fields, change the layout, block the ope
 
 ## Common misconceptions
 
-**“Caches make memory free.”** Caches reduce the average cost of access; they do not remove capacity limits, misses, coherence traffic, or memory bandwidth limits.
+**"Caches make memory free."** Caches reduce the average cost of access; they do not remove capacity limits, misses, coherence traffic, or memory bandwidth limits.
 
-**“A cache miss always costs the same amount.”** The cost depends on which level supplies the line, whether the request is on the critical path, whether it overlaps with other work, and what the rest of the memory system is doing.
+**"A cache miss always costs the same amount."** The cost depends on which level supplies the line, whether the request is on the critical path, whether it overlaps with other work, and what the rest of the memory system is doing.
 
-**“Using less memory always improves cache performance.”** Smaller data can help capacity and bandwidth, but compressing or packing data may add decoding work, reduce useful alignment, or create other costs.
+**"Using less memory always improves cache performance."** Smaller data can help capacity and bandwidth, but compressing or packing data may add decoding work, reduce useful alignment, or create other costs.
 
-**“False sharing means two threads access the same variable.”** That is ordinary sharing. False sharing means the variables are different but happen to occupy the same cache line.
+**"False sharing means two threads access the same variable."** That is ordinary sharing. False sharing means the variables are different but happen to occupy the same cache line.
 
-**“Manual prefetching is always an optimization.”** A bad prefetch can waste bandwidth and evict useful data. It should be introduced only after measurement shows a relevant miss pattern.
+**"Manual prefetching is always an optimization."** A bad prefetch can waste bandwidth and evict useful data. It should be introduced only after measurement shows a relevant miss pattern.
 
-**“Changing a structure to a structure-of-arrays layout is automatically better.”** It may improve a hot field-wise loop but make whole-object operations less convenient or increase complexity. Layout should follow the dominant workload.
+**"Changing a structure to a structure-of-arrays layout is automatically better."** It may improve a hot field-wise loop but make whole-object operations less convenient or increase complexity. Layout should follow the dominant workload.
 
 ## Summary
 
@@ -7489,15 +8739,10 @@ The CPU moves data in cache lines, not in isolated source-level variables. A cac
 
 The important concepts are capacity, locality, latency, bandwidth, and coherence. A single thread can suffer from poor locality, for example scanning a matrix in the wrong order for how it is stored, while multiple threads can suffer from cache-line movement and false sharing when they update nearby counters. The right fix depends on the actual access pattern, so look at the hot data layout and measure the workload instead of applying cache advice mechanically.
 
-## If you want to build this later
-
-Build a **cache locality laboratory**. Implement benchmarks for sequential access, different strides, row-major versus column-major matrix traversal, array-of-structures versus structure-of-arrays layouts, and two counters that either share or avoid a cache line.
-
-For every benchmark, record input size, runtime, CPU cycles, instructions, IPC, and cache-related counters when available. Then write down where the working set fits, which cache lines are reused, whether the workload is latency- or bandwidth-sensitive, and whether your measurements support that explanation.
-
+**Where this leaves us** — tiny now demonstrates locality: a row-major scan of its matrix stays in cache while a column-major scan strides across lines and stalls. The next chapter adds contention from many CPUs touching tiny's memory at once, where atomics decide whether concurrent updates are correct or lost to a race.
 ## Chapter 20 — Memory Ordering and Atomic Hardware
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 19 showed tiny-like scans stalling when their memory accesses miss the cache; with one core that was a latency problem. This chapter adds more cores sharing tiny's memory, where the question becomes not just where data is but whether concurrent updates corrupt it — the world of atomics and races.
 
 ## Start with a counter
 
@@ -7520,6 +8765,78 @@ Both workers read the old value before either writes the new one, so one update 
 The fix for counting is to make the increment indivisible. An atomic operation on a shared object cannot be observed as a partial update. Another thread does not see half the old bits and half the new bits. With an atomic increment, the final value is correctly two.
 
 Atomicity fixes the counter, but it does not by itself fix publishing other data together with a flag. That needs ordering.
+
+## A runnable counter: atomic versus race
+
+The conceptual counter above is easiest to believe when you can run it. The Go program below spawns `goroutines` workers that each increment a shared counter `increments` times. `raceCounter` uses a plain `int` with no synchronization, so the read-increment-write interleaves and the final value is usually wrong. `atomicCounter` uses `sync/atomic`, so every increment is indivisible and the final value is always `goroutines * increments`. Run it with `go run -race` to confirm the data race the detector reports.
+
+```go
+// race_tiny.go — a shared counter incremented by N goroutines, twice:
+// once WITHOUT synchronization (a data race) and once with sync/atomic.
+// Build/run the race version under the detector:
+//   go run -race race_tiny.go
+package main
+
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+)
+
+const (
+	goroutines = 10
+	increments = 100000
+)
+
+// raceCounter updates a plain int with no synchronization. The final value is
+// usually wrong because the read-increment-write is not atomic.
+func raceCounter() int {
+	var counter int
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < increments; i++ {
+				counter++ // data race: read, add, write, interleaved
+			}
+		}()
+	}
+	wg.Wait()
+	return counter
+}
+
+// atomicCounter uses sync/atomic so every increment is indivisible. The final
+// value is always goroutines*increments.
+func atomicCounter() int64 {
+	var counter int64
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < increments; i++ {
+				atomic.AddInt64(&counter, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	return counter
+}
+
+func main() {
+	want := int64(goroutines * increments)
+	fmt.Printf("expected   : %d\n", want)
+
+	r := raceCounter()
+	fmt.Printf("race count : %d  (usually < expected; run with -race to confirm)\n", r)
+
+	a := atomicCounter()
+	fmt.Printf("atomic count: %d  (always == expected)\n", a)
+}
+```
+
+The plain `int` version loses updates because the three-step `counter++` is not atomic, exactly like the diagram at the start of the chapter. The `sync/atomic` version closes that gap with a single indivisible read-modify-write issued to the hardware.
 
 ## Three questions that are easy to confuse
 
@@ -7893,17 +9210,17 @@ For production, the question is rarely which primitive is fastest in theory. It 
 
 ## Common misconceptions
 
-**“Atomic means synchronized.”** Atomicity protects one operation on one object. It does not by itself publish other data.
+**"Atomic means synchronized."** Atomicity protects one operation on one object. It does not by itself publish other data.
 
-**“If a write eventually becomes visible, the program is correct.”** A reader may need to see several writes in a specific order. Eventual visibility without the required ordering is not enough.
+**"If a write eventually becomes visible, the program is correct."** A reader may need to see several writes in a specific order. Eventual visibility without the required ordering is not enough.
 
-**“Source order is execution order.”** The compiler and the CPU can transform and overlap work when allowed. Synchronization says what order another thread can rely on.
+**"Source order is execution order."** The compiler and the CPU can transform and overlap work when allowed. Synchronization says what order another thread can rely on.
 
-**“Flushing a cache line fixes sharing.”** Cache maintenance is architecture specific and is about caches, while thread synchronization needs the ordering that the language provides.
+**"Flushing a cache line fixes sharing."** Cache maintenance is architecture specific and is about caches, while thread synchronization needs the ordering that the language provides.
 
-**“Sequential consistency fixes every bug.”** It gives a strong order for atomic operations, but it does not fix wrong ownership, missing lifetime handling, or data races on non-atomic objects.
+**"Sequential consistency fixes every bug."** It gives a strong order for atomic operations, but it does not fix wrong ownership, missing lifetime handling, or data races on non-atomic objects.
 
-**“Lock-free means faster.”** Lock-free can avoid blocking, but it often costs more under contention and is harder to check and maintain.
+**"Lock-free means faster."** Lock-free can avoid blocking, but it often costs more under contention and is harder to check and maintain.
 
 ## Summary
 
@@ -7911,15 +9228,10 @@ When threads share memory, three questions matter. Can an operation be seen part
 
 The compiler and the CPU reorder work to make it faster. Atomics, release and acquire, sequential consistency, fences, and locks give you the guarantees you choose. Use the smallest ordering that is clearly correct when performance requires it, but prefer a simpler design when the cost has not been measured. The most reliable way to reason about concurrent code is to name who owns what, list the shared state, draw the links, and state which transitions are allowed. If the explanation relies on what the CPU probably does first, it is not yet a correctness argument.
 
-## If you want to build this later
-
-Build a bounded queue that has one producer and one consumer and uses atomics. Start with a version that uses a mutex so you have a clearly correct baseline. Then build a ring buffer where the producer and consumer each track a position, state who owns each slot, and use release to publish a new entry and acquire to observe it.
-
-Test when the queue is empty and full, when the indices wrap around, when the program shuts down, and when the handoff is repeated many times. Build with ThreadSanitizer where it is available, stress with different sizes, and compare against the mutex version. End by writing down why each atomic uses its ordering and what would break if you made that ordering weaker.
-
+**Where this leaves us** — tiny's shared counter now shows the difference a single `sync/atomic` makes: without it the count is lost to interleaving, with it every increment is indivisible. The next chapter looks at what happens when a memory access is not merely raced but outright illegal — the trap that delivers SIGSEGV.
 ## Chapter 21 — Interrupts, Traps, Exceptions, and Device I/O
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 20 ended with threads racing on tiny's shared memory; the hardware stayed silent because the accesses were merely unordered, not forbidden. This chapter covers the access that the CPU cannot allow — a faulting store — and the trap, exception, and interrupt machinery that catches it and notifies the kernel.
 
 ## The CPU cannot poll everything
 
@@ -8001,8 +9313,6 @@ Interrupts and polling trade latency for CPU. At low rates, interrupts are bette
 
 A table makes the tradeoff more concrete, but the exact numbers depend on the machine.
 
-Interrupts have a small wakeup delay and use little CPU when idle, but they can storm under load. Polling has no per-event wakeup cost and its CPU usage is predictable, but it wastes work when idle. Linux uses a hybrid. At low rates it is interrupt driven, at high rates it polls a budget of packets and then re-enables interrupts. For a backend, you would only enable busy polling like `SO_BUSY_POLL` or `io_uring`'s `SQPOLL` after measuring that p99 improves more than CPU rises.
-
 ```mermaid
 flowchart TD
     Rate{Is the device bursty?}
@@ -8038,6 +9348,77 @@ perf stat -e irq_vectors:local_timer_entry ./program
 On a virtual machine the numbers are virtualized and less meaningful. On bare metal, balance matters. If a network card's interrupts are pinned to one CPU, that CPU can become the bottleneck while others are idle. The affinity is visible in `/proc/irq/*/smp_affinity` and can be changed.
 
 A small experiment helps make DMA concrete. Read the same large file once normally and once with `O_DIRECT`, and compare the time, the `r_await` in `iostat`, and the `nvme` interrupt count. One path goes through the page cache with copies, the other avoids the cache and completes through DMA and an interrupt. The point is not that one is always better, but that the difference shows up in those counters.
+
+## A tiny program that takes a trap
+
+The counters and `/proc/interrupts` above show the device side. The user side is easier to feel with a program that faults on purpose. The C program below maps a page, marks it inaccessible with `mprotect(... PROT_NONE)`, and then dereferences it. The store is illegal, so the CPU raises a page-fault exception; the kernel delivers `SIGSEGV`; our handler catches it and explains the trap path. The program also uses `rdtsc` to compare the cost of a normal syscall (`getpid`) against the cost of the faulting access, so you can see that both cross into the kernel but for opposite reasons.
+
+```c
+/* trap_tiny.c — tiny deliberately takes a trap by touching a PROT_NONE page.
+ * Build: cc -O2 -g trap_tiny.c -o trap_tiny
+ * Run:   ./trap_tiny
+ *
+ * The program maps a page, marks it inaccessible with mprotect(...PROT_NONE),
+ * then dereferences it. The CPU raises a page-fault exception; the kernel
+ * delivers SIGSEGV; our handler catches it and explains the trap path. We also
+ * time a normal syscall (getpid) versus the trap using rdtsc.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <x86intrin.h>
+
+static volatile sig_atomic_t trapped = 0;
+
+static void segv_handler(int sig, siginfo_t *info, void *ucontext) {
+    (void)ucontext;
+    trapped = 1;
+    fprintf(stderr, "trap: SIGSEGV delivered for access at %p (signo=%d)\n",
+            info->si_addr, sig);
+    /* The fault already proved the point; exit cleanly. */
+    exit(0);
+}
+
+static inline unsigned long long rdtsc(void) {
+    return __rdtsc();
+}
+
+int main(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = segv_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+
+    /* Time a deliberate trap: a syscall vs a faulting access. */
+    unsigned long long t0 = rdtsc();
+    (void)getpid();                 /* normal syscall: ring3 -> ring0 -> ring3 */
+    unsigned long long t1 = rdtsc();
+    printf("syscall getpid took %llu cycles\n", t1 - t0);
+
+    void *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) { perror("mmap"); return 1; }
+
+    /* Make the page inaccessible. Any access now faults into the kernel. */
+    if (mprotect(page, 4096, PROT_NONE) != 0) { perror("mprotect"); return 1; }
+
+    t0 = rdtsc();
+    *(volatile int *)page = 42;     /* this store triggers the page-fault trap */
+    t1 = rdtsc();
+    /* Not reached: the handler exits. Shown for completeness. */
+    printf("trap path took %llu cycles\n", t1 - t0);
+
+    munmap(page, 4096);
+    printf("trapped=%d\n", (int)trapped);
+    return 0;
+}
+```
+
+The annotated path is: user code executes `*(volatile int *)page = 42` -> the MMU sees the page has no write permission -> the CPU raises a page-fault exception 0xE on x86-64 -> the IDT sends it to the kernel's `#PF` handler -> the kernel finds no valid mapping for that address in the process and sends `SIGSEGV` -> our `sigaction` handler runs in user space and reports the faulting address from `si_addr`. The `getpid` call took a `syscall` instruction instead, which is a trap the program intended; the kernel validated the number and returned. Both are entries into ring 0, but one is requested and one is a fault.
 
 ## A realistic production example
 
@@ -8091,19 +9472,19 @@ They start with whether the interrupt is firing at all, which you can see from t
 
 ## Common misconceptions
 
-### “Interrupts are just system calls.”
+### "Interrupts are just system calls."
 
 A system call is a trap that the program runs on purpose. An interrupt comes from a device at an arbitrary time. They use the same entry mechanism but come from different sources and run in different contexts.
 
-### “DMA means no CPU work.”
+### "DMA means no CPU work."
 
 DMA avoids copying every byte, but the CPU still has to pin pages, program the device, handle the interrupt, and wake the waiter. The work is smaller, not zero.
 
-### “More interrupts always means faster.”
+### "More interrupts always means faster."
 
 At high rates a storm of interrupts and softirqs can saturate a core and delay user threads. Coalescing or polling can be faster when measured.
 
-### “MMIO memory is normal RAM.”
+### "MMIO memory is normal RAM."
 
 It is not. A read can clear a status register, caching is disabled, and ordering requires barriers. It behaves like device communication, not storage.
 
@@ -8111,13 +9492,10 @@ It is not. A read can clear a status register, caching is disabled, and ordering
 
 Devices and the CPU coordinate through interrupts that arrive from hardware, traps that user code runs intentionally, and exceptions that are faults. The first handler must be tiny and atomic, and heavier work is deferred to softirqs or workqueues. Data reaches devices through memory-mapped registers and reaches RAM in bulk through DMA, both managed by drivers. Polling trades steady CPU for lower tail latency when the rate is high. For a backend, a packet or a disk completion follows the same path every time, from interrupt to DMA to softirq to wakeup, and where that interrupt lands determines latency.
 
-## If you want to build this later
-
-You can study this without custom hardware. Write one program that blocks on a pipe read and another that waits with `epoll`, and compare the wakeup latency. Look at `/proc/interrupts` before and after copying a large file with `dd`, and note how the count grows. If you can, trace softirq time with `mpstat -I` at low and high load, then enable busy polling with `SO_BUSY_POLL` and see how p99 and CPU change. The goal is to decide for your own workload whether the notification path should be interrupt driven or polled.
-
+**Where this leaves us** — tiny now takes a real trap: a store to a `PROT_NONE` page faults into the kernel, which delivers SIGSEGV to the process. The next chapter separates this accidental fault from the deliberate, validated crossing tiny makes on every system call — the CPU privilege gate.
 ## Chapter 22 — CPU Privilege Levels and Protection
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 21 showed tiny faulting into the kernel when it broke a memory rule; that entry was an exception the CPU raised unwillingly. This chapter covers the entry tiny makes on purpose — the `syscall` instruction — and the privilege gate that enforces every ring-3 to ring-0 transition.
 
 ## Why privilege is needed
 
@@ -8199,6 +9577,59 @@ sequenceDiagram
 ```
 
 The kernel copies user memory with helpers like `copy_from_user` for a reason. Between the time it checks a pointer and the time it uses it, the user thread could change the memory. The helper handles that safely, which is the same point made in the system call article about trusting user pointers.
+
+## A tiny program that crosses the gate
+
+The privilege gate is easiest to see when a program issues the syscall itself. The Go program below calls `getpid` through `unix.Syscall`, which emits the `SYSCALL` instruction and moves ring 3 -> ring 0 -> ring 3. It then runs a pure user-space loop that never leaves ring 3, and times 1000 syscalls so the mode-switch cost is visible. The contrast is the point: tiny's file read in earlier chapters ultimately went through this same gate, validated by the CPU against the IDT.
+
+```go
+// gate_tiny.go — tiny crosses the privilege gate on a syscall.
+// Build: go build -o gate_tiny .
+// Run:  ./gate_tiny
+//
+// getpid is issued with unix.Syscall, which executes the SYSCALL instruction:
+// ring 3 (user) -> ring 0 (kernel) -> ring 3 (user). We contrast it with a
+// pure user-space computation that never leaves ring 3.
+package main
+
+import (
+	"fmt"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+// userOnly does arithmetic and never traps into the kernel.
+func userOnly(n int) int {
+	s := 0
+	for i := 0; i < n; i++ {
+		s += i
+	}
+	return s
+}
+
+func main() {
+	// The syscall gate: user code asks the kernel for its PID.
+	pid, _, _ := unix.Syscall(unix.SYS_GETPID, 0, 0, 0)
+	fmt.Printf("getpid via syscall gate: %d (ring3 -> ring0 -> ring3)\n", int(pid))
+
+	// A user-space-only computation for contrast.
+	t0 := time.Now()
+	s := userOnly(1_000_000)
+	fmt.Printf("user-space loop: %v (never left ring 3)\n", time.Since(t0))
+
+	// The same gate, measured: crossing it has a mode-switch cost.
+	t1 := time.Now()
+	for i := 0; i < 1000; i++ {
+		unix.Syscall(unix.SYS_GETPID, 0, 0, 0)
+	}
+	fmt.Printf("1000 syscalls: %v\n", time.Since(t1))
+
+	_ = s
+}
+```
+
+The `SYSCALL` instruction does not jump to the kernel's C code directly. The CPU reads the `IA32_LSTAR` MSR for the kernel entry address, switches `CS` to a ring-0 selector, swaps in the kernel stack, and saves `RIP`/`RFLAGS` into the kernel. The kernel decodes the number in `RAX` (`SYS_GETPID` here), performs the work with full privilege, then executes `SYSRET` to restore ring 3. A plain arithmetic loop never sets the `SYS` bit in the gate; it stays in ring 3 the whole time, which is why it is dramatically cheaper per operation.
 
 ## Secure Boot and other hardware protections
 
@@ -8299,19 +9730,19 @@ The habit is to ask which level said no. A page permission fault, a `seccomp` fi
 
 ## Common misconceptions
 
-### “Kernel space is just a folder.”
+### "Kernel space is just a folder."
 
 It is a privilege mode enforced by hardware. Directories like `/boot` have nothing to do with it. One is about files, the other is about which instructions the CPU will allow.
 
-### “More privilege is always faster.”
+### "More privilege is always faster."
 
 Entering the kernel is slower because the CPU must switch mode, save state, and validate. Privilege is for protection, not speed. If you cross it often, batch system calls or use `io_uring` to reduce trips.
 
-### “If I am root, privilege does not matter.”
+### "If I am root, privilege does not matter."
 
 `root` is a software identity. Even as `root`, user code still runs in user mode until it traps. Container `root` can still be blocked by `seccomp`, capabilities, and page protections.
 
-### “Secure Boot is just for laptops.”
+### "Secure Boot is just for laptops."
 
 Cloud VMs and containers use measured boot to seal keys and attest which kernel booted. That attestation is how you know the kernel that gained privilege is the one you expected.
 
@@ -8319,20 +9750,15 @@ Cloud VMs and containers use measured boot to seal keys and attest which kernel 
 
 Privilege levels are the hardware reason the operating system can actually enforce isolation. User code asks through traps, the CPU only allows entry through gates, each page carries its own permission bits, and features like IOMMU and Secure Boot extend the same idea beyond the basic rings. For a backend, the difference between `EPERM`, `EFAULT`, and `SIGSEGV`, or between `mmap` succeeding and `mprotect` failing, is the sound of this boundary doing its job.
 
-## If you want to build this later
-
-Extend the inspection tool you built earlier. Make it parse `CapEff`, `Seccomp`, and the permission column of `/proc/self/maps`, and print the protection reported in `dmesg`. Then write a small C program that maps a page readable and tries to write it to see `SIGSEGV`, and another that does a correct write-then-execute JIT transition with two `mprotect` steps. Run the same binary under `seccomp` with `prctl` and note which layer rejected each attempt, from the page bit to the kernel filter.
-
+**Where this leaves us** — tiny now crosses the privilege gate on every system call: `SYS_GETPID` moves ring 3 to ring 0 and back, validated by the CPU against the IDT, while a pure user-space loop never leaves ring 3. In Part IV tiny stops being a running process and becomes the file the kernel maps — Chapter 23 follows it through the compilation pipeline that turns these same source lines into an executable.
 # Part IV — From Source Code to Execution
 
-The tiny program that has been a process so far now becomes the file that the kernel maps. Go is the primary language for the examples, because the book's runnable code is Go, but the concepts are the same for any compiled language.
+In Part III, `tiny` was something the CPU executed and something a process held in memory. Here it becomes the file the kernel maps: the Go source you have been reading is turned into an object file, then an executable, and finally an address space. We follow that one program — `tiny`, which reads the file named by `TINY_FILE` (default `message.txt`) and prints it — through every stage of the toolchain so the chain from the previous part stays unbroken. Chapter 23 opens the compilation pipeline that turns `tiny.go` into machine code, Chapter 24 looks at the assembly and calling convention `main.main` actually uses, Chapter 25 inspects the object file's sections and symbols, Chapter 26 links those objects statically and dynamically, and Chapter 27 reads the ELF header and watches the kernel start `tiny` as a process.
 
 ---
 
 
 ## Chapter 23 — The Compilation Pipeline
-
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
 
 ## The tiny program we will follow
 
@@ -8436,41 +9862,82 @@ The practical habit is to fix the rule violation, not to argue that the optimize
 
 ## Seeing the pipeline with Go
 
-The following sequence is a Level 1 read that you can run without any setup beyond a Go toolchain on Linux. It makes the pipeline concrete for the tiny program.
+The following annotated walkthrough makes the whole pipeline concrete for `tiny`. First the exact source we track through every stage:
 
-```bash
-go version
-go build -x -o tiny main.go 2>&1 | head -n 20
-ls -lh tiny && file tiny
-go tool compile -S -o /tmp/main.o main.go | head -n 30
+```go
+// tiny.go
+package main
+
+import (
+    "fmt"
+    "os"
+)
+
+func main() {
+    path := os.Getenv("TINY_FILE")
+    if path == "" {
+        path = "message.txt"
+    }
+    data, err := os.ReadFile(path)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
+        os.Exit(1)
+    }
+    fmt.Print(string(data))
+}
 ```
 
-What it demonstrates is the boundary between source and binary. The first command shows the toolchain invoking `compile` and `link`. The second shows the size and type of the executable. The third shows the assembly before it is linked.
-
-You should see that `go tool compile -S` prints Go assembly with labels like `TEXT main.main(SB), $40-0`. The important line is `TEXT`, which says this is a function body with a stack frame size, and the `$` value, which is how much stack space the function reserves. On `amd64` you will see `AX`, `BX`, `CX` registers, on `arm64` you will see `R0`, `R1`.
-
-A Level 2 exercise compares optimization and debug information.
+Save it as `tiny.go` and run the script below. It drives each pipeline stage explicitly and prints the artifacts so you can see what the toolchain produced.
 
 ```bash
-go build -gcflags="all=-l -B" -o tiny.noopt main.go
-go build -o tiny.opt main.go
-ls -lh tiny.noopt tiny.opt
+#!/usr/bin/env bash
+set -e
 
-go build -o tiny.withdbg main.go
-go build -ldflags="-s -w" -o tiny.stripped main.go
-ls -lh tiny.withdbg tiny.stripped
-size tiny.withdbg tiny.stripped
+# --- Stage 1: source -> parse + type check + SSA -> object file ---
+# go tool compile turns tiny.go into main.o: machine code in sections,
+# a symbol table, relocations for os.ReadFile, and DWARF line tables.
+echo "== compile main package to object file =="
+go tool compile -o main.o tiny.go
+file main.o
+# main.o: Go object file, not runnable on its own
+
+# --- Stage 2: peek at the assembly the compiler generated, pre-link ---
+echo "== generated assembly for main.main (first lines) =="
+go tool compile -S -o /dev/null tiny.go | sed -n '1,14p'
+# TEXT main.main(SB), ABIInternal, $120-32
+#         MOVQ    os.Getenv(SB), AX      ; load function address
+#         CALL    AX
+#         ...
+
+# --- Stage 3: reveal the FULL pipeline compile -> asm -> link ---
+echo "== full pipeline as the toolchain runs it =="
+rm -rf /tmp/tinywork
+go build -x -work -o tiny tiny.go 2>/tmp/tiny_build.log
+echo "WORK dir: $(grep -m1 'WORK=' /tmp/tiny_build.log | cut -d= -f2)"
+grep -E "compile|link" /tmp/tiny_build.log | head -n 8
+# mkdir -p $WORK/b001/
+# go tool compile -o $WORK/b001/_pkg_.a -p main ... ./tiny.go
+# go tool link -o $WORK/b001/exe/a.out ... $WORK/b001/_pkg_.a
+# cp $WORK/b001/exe/a.out tiny
+
+# --- Stage 4: inspect the final linked executable ---
+echo "== resulting executable =="
+ls -lh tiny
+file tiny
+# tiny: ELF 64-bit LSB executable, statically linked (Go), not stripped
+
+# --- Stage 5: debug-info tradeoff (optimized+debug vs stripped) ---
+echo "== debug information vs stripping =="
+go build -o tiny.dbg tiny.go
+go build -ldflags="-s -w" -o tiny.stripped tiny.go
+ls -lh tiny.dbg tiny.stripped
+size tiny.dbg tiny.stripped
+#    text    data     bss      dec      filename
+#   1.2M   28k     24k    1.3M    tiny.dbg
+#   1.1M   24k     24k    1.2M    tiny.stripped
 ```
 
-You will typically see that the optimized binary is smaller and that the stripped binary loses the symbol and DWARF sections. The difference is not just cosmetic. A debugger will show fewer variables in the stripped case, and a profiler will show raw addresses instead of Go function names. In a production service you often want one binary with debug information for profiling and a stripped one for distribution, or you keep the debug info separately.
-
-The same program built for another architecture shows why intermediate representation matters.
-
-```bash
-GOARCH=arm64 go tool compile -S -o /tmp/main_arm64.o main.go | head -n 30
-```
-
-The structure of the function is the same, but the registers and instructions differ. The compiler chose the same optimizations on a different target, which is exactly the separation the pipeline is meant to provide.
+What the walkthrough demonstrates is the boundary between source and binary. `go tool compile` produced `main.o` with a `TEXT main.main` body, relocations for `os.ReadFile`, and DWARF line tables. `go build -x -work` shows the same compile step plus the `go tool link` step that collects the runtime, `os`, and `fmt` objects and writes the final executable. The stripped artifact keeps the instructions but drops the symbol and DWARF sections, which is exactly the tradeoff between speed and observability the next chapters keep returning to.
 
 ## A realistic production example
 
@@ -8542,13 +10009,13 @@ An object file and an executable also carry symbols, relocations, and debug info
 
 Source text becomes a running program through several stages. Parsing and type checking ensure the program is valid, an intermediate representation makes it easy to improve, optimization chooses tradeoffs between speed and observability, code generation lowers it to the target processor, assembly turns it into object files with sections and symbols, and debug information records how to map the result back to source. The same program can look very different after those stages, which is why you record the toolchain version and flags that built the binary you are debugging.
 
-## If you want to build this later
+**Where this leaves us**
 
-Extend the tiny program so it has two packages, where `main` calls a function in the other package. Build it with `go build -x -o tiny` and save the compile and link commands. Compare `go tool compile -S` for the package with and without `all=-l`, and note which calls were inlined with `go build -gcflags="-m"`. Inspect the result with `objdump -d --no-show-raw-insn tiny | grep -A 5 "main.main"` and with `readelf --debug-dump=info tiny | head`. Build once more with `go build -ldflags="-s -w"` and compare `ls -lh` and `size`. Write down which optimization you would keep for a production service and which artifact you would keep for debugging, and why the two should not be the same binary when you care about both speed and observability.
+`tiny` is no longer just source: it is now an object file and a linked executable, with `main.main` present as `TEXT` and references like `os.ReadFile` left as relocations. The next chapter opens that compiled form and shows the actual instructions and calling convention the CPU executes when `tiny` starts.
 
 ## Chapter 24 — Assembly, Calling Conventions, and Stack Frames
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+In Chapter 23, `tiny` left the compiler as an object file holding machine code in sections; now we open that compiled form and the linked binary to see how `main.main` actually moves arguments and returns values — the assembly and calling convention the pipeline generated, and the stack frame that holds `tiny`'s locals.
 
 ## Registers and instructions
 
@@ -8635,6 +10102,49 @@ GOARCH=arm64 go tool compile -S -o /tmp/b.o main.go 2>&1 | grep -A 8 '"".add'
 You will see that the `amd64` version mentions `AX`, `BX`, `SP`, and `CALL`, while the `arm64` version mentions `R0`, `R1`, `SP`, and `BL`. The source `add` did not change, but the instructions that implement it did, because the calling convention is per architecture.
 
 Another difference is whether a frame pointer is kept. A frame pointer, like `RBP` on `amd64`, makes walking the stack trivial for a debugger, but it costs a register and a couple of instructions. An optimized Go build often recovers that cost and keeps precise tables for stack walking instead. That is why `gdb` can show a Go backtrace even when no `RBP` chain exists.
+
+## An annotated disassembly of tiny's main
+
+The most direct way to see `tiny`'s calling convention is to disassemble the linked binary and read `main.main` line by line. Build the default optimized binary, then dump the function with both the Go-aware tool and the system `objdump`:
+
+```bash
+go build -o tiny main.go
+
+echo "== go tool objdump: main.main =="
+go tool objdump -s "main.main" tiny | head -n 60
+# TEXT main.main(SB) /home/user/tiny.go
+#   tiny.go:124       0x4589a0    MOVQ OS.Getenv(SB), AX      ; load addr of getenv
+#   tiny.go:124       0x4589a7    LEAQ go.string.*+nnnn(SB), BX ; "TINY_FILE"
+#   tiny.go:124       0x4589ae    CALL AX                     ; call os.Getenv(path)
+#   tiny.go:124       0x4589b0    MOVQ 8(SP), AX              ; AX = returned string ptr
+#   tiny.go:124       0x4589b5    MOVQ 16(SP), BX             ; BX = returned string len
+#   tiny.go:125       0x4589ba    TESTQ BX, BX                ; len == 0 ?
+#   tiny.go:125       0x4589bd    JNE  0x4589d0               ; if path != "" skip default
+#   tiny.go:126       0x4589bf    LEAQ go.string.*+mmmm(SB), CX ; "message.txt"
+#   tiny.go:126       0x4589c6    MOVQ CX, 8(SP)              ; path = "message.txt"
+#   tiny.go:126       0x4589cb    MOVQ $11, 16(SP)           ; len = 11
+#   tiny.go:127       0x4589d0    MOVQ runtime.ReadFile(SB), AX ; load addr of ReadFile
+#   tiny.go:127       0x4589d7    CALL AX                     ; data, err := os.ReadFile(path)
+#   tiny.go:128       0x4589d9    MOVQ 24(SP), DX             ; DX = err interface
+#   tiny.go:128       0x4589de    TESTQ DX, DX                ; err != nil ?
+#   tiny.go:128       0x4589e1    JEQ  0x458a00               ; if err == nil -> print
+#   tiny.go:129       0x4589e3    MOVQ os.Stderr(SB), AX      ; write to stderr
+#   ...
+#   tiny.go:131       0x458a00    CALL runtime.printstring(SB) ; fmt.Print(string(data))
+
+echo "== system objdump: prologue/epilogue of main.main =="
+objdump -d --no-show-raw-insn tiny | awk '/<main.main>:/,/ret/' | head -n 30
+# 00000000004589a0 <main.main>:
+#     sub    $0x78, %rsp        ; prologue: reserve 120 bytes frame
+#     mov    %rbp, 0x70(%rsp)   ; save caller's frame pointer (when fp kept)
+#     lea    0x...(%rip), %rax  ; "TINY_FILE"
+#     call   *%rax              ; os.Getenv
+#     ...
+#     add    $0x78, %rsp        ; epilogue: free frame
+#     ret                      ; return to runtime
+```
+
+Read it as a calling-convention story. `os.Getenv` and `os.ReadFile` are passed their argument — the string pointer and length — in registers and on the stack slot the caller reserved (the `$120-32` frame: 120 bytes local, 32 bytes for args/results). The return value comes back in `AX`/`BX` (pointer and length) for the string, and later in `DX` for the error interface. The `if path == ""` and `if err != nil` are just `TESTQ` plus a conditional jump (`JNE`/`JEQ`), the same branch the pipeline produced from the source `if`. The prologue `sub $0x78, %rsp` reserves the frame and the epilogue `add $0x78, %rsp; ret` restores it — exactly the saved-registers, locals, and return-address layout from the stack-frame diagram. The same `main.main` on `arm64` would use `R0`/`R1` and a `BL` link-register call instead, because the convention is per architecture.
 
 ## Seeing frames with a debugger
 
@@ -8729,13 +10239,13 @@ Frame size depends on locals, saved registers, and whether arguments spill to th
 
 A call becomes a protocol. The caller puts arguments where the ABI says, saves the return address, and jumps. The callee builds a frame in its prologue, uses registers and stack slots for locals, puts a result where the caller expects it, and restores the frame in its epilogue. The same source can give different registers and stack layouts on `amd64` and `arm64` because the convention is per architecture. A debugger and `objdump` show you that mapping, and an optimized build can hide it by inlining the call entirely.
 
-## If you want to build this later
+**Where this leaves us**
 
-Extend the tiny program so `main` calls a helper that takes two integers and returns their sum, and build it twice, once normally and once with `all=-l`. Use `go tool compile -S` to note whether the helper was inlined and how many `CALL` instructions remain. Then use `go tool objdump -s "main.main"` to record where the arguments are moved before each call and where the result is used after. Break in `gdb` at `main.main`, run `backtrace` and `info frame`, and write down the current stack pointer and the return address for each frame. Compare `amd64` and `arm64` output and note which registers changed for the same source call.
+`tiny`'s instructions now read as a calling convention: arguments in registers, results returned in registers, a prologue that reserves a stack frame and an epilogue that frees it. The next chapter looks inside the object file to see how those instructions and strings are laid out as sections and named by symbols before the linker patches them.
 
 ## Chapter 25 — Object Files, Sections, and Symbols
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+In Chapter 24, `tiny`'s `main.main` became real instructions following a calling convention; now we step back to the container those instructions live in — the object file — and read its sections, symbols, and relocations with `readelf` and `nm` to see how `tiny`'s code and the `"message.txt"` string are organized before linking.
 
 ## Why an object file is not a program
 
@@ -8797,40 +10307,95 @@ A symbol table lets the linker connect objects. DWARF lets a human connect the f
 
 ## Seeing sections and symbols with Go
 
-You can inspect the same tiny program at the object level without any extra setup beyond the Go toolchain and standard Linux tools. The following sequence is a Level 1 read.
+Compile `tiny.go` to an object file, then inspect it with the standard Linux tools. The session below is annotated so each command ties back to `tiny`'s code.
 
 ```bash
-go build -o tiny main.go
-file tiny
+# Build the object file for the main package (pre-link).
+go tool compile -o tiny.o tiny.go
+
+echo "== readelf -S : section headers of tiny.o =="
+readelf -S tiny.o | sed -n '1,22p'
+# There are 14 section headers, starting at offset 0x...
+#
+# Section Headers:
+#   [Nr] Name              Type            Addr  Off   Size  ES Flg Lk Inf Al
+#   [ 1] .text             PROGBITS        0000  0200  0b40  00  AX   0   0  16
+#   [ 2] .rodata           PROGBITS        0000  0d40  0240  00   A   0   0  32
+#   [ 3] .typelink         PROGBITS        0000  0f80  0020  00   A   0   0   8
+#   [ 4] .itablink         PROGBITS        0000  0fa0  0010  00   A   0   0   8
+#   [ 5] .gosymtab         PROGBITS        0000  0fb0  0000  00   A   0   0   8
+#   [ 6] .gopclntab        PROGBITS        0000  0fc0  0500  00   A   0   0   8
+#   [ 7] .go.buildinfo     PROGBITS        0000  14c0  0040  00  WA   0   0   8
+#   [ 8] .symtab           SYMTAB          0000  1500  0300  00      9   1   8
+#   [ 9] .strtab           STRTAB          0000  1800  0200  00      0   0   1
+#   [10] .rela.text        RELA            0000  1a00  0200  18      8   1   8
+#   [11] .debug_info       PROGBITS        0000  1c00  0800  00      0   0   1
+#   [12] .debug_line       PROGBITS        0000  2400  0400  00      0   0   1
+#
+# .text is flagged AX (alloc + execute): that is tiny's main.main code.
+# .rodata is A (alloc, read-only): the "TINY_FILE", "message.txt",
+#   and "read %s: %v\n" string literals live here.
+# .rela.text records the relocations the linker must patch.
+# .debug_info / .debug_line are DWARF for gdb and pprof.
+
+echo "== readelf -s : symbol table of tiny.o =="
+readelf -s tiny.o | sed -n '1,20p'
+# Symbol table '.symtab' contains 25 entries:
+#    Num: Value  Size Type    Bind   Vis      Ndx Name
+#      1: 0000   0000 FILE    LOCAL  DEFAULT  ABS tiny.go
+#      2: 0000   0288 FUNC    GLOBAL DEFAULT    1 main.main
+#      3: 0000   0000 FUNC    GLOBAL DEFAULT  UND runtime.getenv
+#      4: 0000   0000 FUNC    GLOBAL DEFAULT  UND os.ReadFile
+#      5: 0000   0000 FUNC    GLOBAL DEFAULT  UND os.Exit
+#      6: 0000   0000 FUNC    GLOBAL DEFAULT  UND runtime.printstring
+#
+# main.main is defined (Ndx 1 = .text). runtime.getenv, os.ReadFile,
+# os.Exit, runtime.printstring are UND: undefined here, resolved at link.
+
+echo "== nm : another view of the same symbols =="
+nm tiny.o | grep -E " main\.| getenv| ReadFile| Exit| printstring"
+# 0000000000000000 T main.main
+#                  U os.ReadFile
+#                  U os.Exit
+#                  U runtime.getenv
+#                  U runtime.printstring
+# T = defined in text; U = undefined, needed from another object.
+
+echo "== relocations that still need fixing (pre-link) =="
+readelf --relocs tiny.o | sed -n '1,16p'
+# Relocation section '.rela.text' at offset 0x1a00:
+#   Offset          Info           Type             Sym. Value    Sym. Name + Addend
+#   000000000010  000300000002  R_X86_64_PC32    runtime.getenv + 0
+#   000000000040  000400000002  R_X86_64_PC32    os.ReadFile   + 0
+#   000000000080  000500000002  R_X86_64_PC32    os.Exit      + 0
+#   0000000000c0  000600000002  R_X86_64_PC32    runtime.printstring + 0
+# Each line is a hole the linker will fill with the final address.
+```
+
+The same `tiny` built and linked shows the symbols resolved:
+
+```bash
+go build -o tiny tiny.go
+echo "== symbols after linking =="
+nm tiny | grep -E " main\.main| os\.ReadFile| runtime\.getenv"
+# 00000000004589a0 T main.main
+# 00000000004b2000 T os.ReadFile
+# 0000000000450000 T runtime.getenv
+# Now every name has a real address; no U remains for these.
+
+echo "== section sizes of the linked binary =="
 size tiny
-readelf -S tiny | head -n 30
+#    text     data     bss      dec      filename
+#  1.2M     28k      24k     1.3M     tiny
 ```
 
-`file` tells you the kind of executable, `size` shows how many bytes are in `text`, `data`, and `bss`, and `readelf -S` lists the section headers. Look for `.text`, `.rodata`, `.data`, `.bss`, `.symtab`, and `.debug_info` among many Go-specific sections like `.gopclntab`. The short strings in the output, `AX` for execute or `WA` for write-allocate, tell you how the loader will map each section.
-
-To see symbols, ask for the table with demangled Go names.
-
-```bash
-go tool nm tiny | grep "main\."
-nm -g tiny | head
-```
-
-What it demonstrates is which names are global and where they live. You should see `main.main` as a global text symbol with a type `T`, and `os.ReadFile` resolved to its address. Before linking, an intermediate object would have shown `os.ReadFile` as undefined.
-
-To see relocations as they looked before linking, ask the compiler to keep the object for one package.
-
-```bash
-go tool compile -S -o /tmp/main.o main.go
-readelf --relocs /tmp/main.o 2>&1 | head -n 40
-```
-
-The relocation entries show where the compiler left holes that the linker later fixed. Each line names the offset, the relocation type, and the symbol.
+What the session shows is that `tiny`'s instructions sit in `.text`, its string literals sit in `.rodata`, `main.main` is a global `T` symbol while `os.ReadFile` is `U` until linking, and `.rela.text` records exactly where the linker must patch each call. After linking those holes are filled and `nm` reports real addresses.
 
 A Level 2 exercise shows why debug information matters.
 
 ```bash
-go build -o tiny.withdbg main.go
-go build -ldflags="-s -w" -o tiny.stripped main.go
+go build -o tiny.withdbg tiny.go
+go build -ldflags="-s -w" -o tiny.stripped tiny.go
 ls -lh tiny.withdbg tiny.stripped
 readelf -S tiny.withdbg | grep debug
 readelf -S tiny.stripped | grep debug
@@ -8911,13 +10476,13 @@ Relocations are those notes. They say exactly where to patch once the final layo
 
 Object files separate concerns. Sections keep code, read-only data, initialized data, and zeroed space distinct. The symbol table says which names are defined here and which are needed elsewhere. Relocations say where the final addresses must be written. Debug information records how to translate the result back to Go source. None of these run by themselves. They are what the linker will collect and patch to build the executable the loader can map.
 
-## If you want to build this later
+**Where this leaves us**
 
-Build the tiny program with `go build -o tiny main.go` and record `readelf -S tiny`, `nm tiny`, and `size tiny`. Then build the package as an object with `go tool compile -S -o /tmp/main.o main.go` and run `readelf --relocs /tmp/main.o` to note which symbols were still undefined. Rebuild with `go build -ldflags="-s -w"` and compare the section list and the `nm` output. For each of `main.main`, a string literal, and a `var` you add, write down which section it lives in, whether its symbol is local or global, and whether any relocation refers to it. Keep the unstripped file for `addr2line` and note what is lost when it is stripped.
+`tiny` is now an object file whose code sits in `.text`, whose strings sit in `.rodata`, and whose `main.main` is a named symbol with relocations pointing at `os.ReadFile`. The next chapter runs the linker over those objects to produce one executable, statically or dynamically.
 
 ## Chapter 26 — Linking: Static Libraries and Shared Libraries
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+In Chapter 25, `tiny`'s bytes were organized as sections and named by symbols with relocations still open; now the linker collects those objects and patches the holes — and we build `tiny` two ways, dynamic and static, to see how linking decides whether the runtime is copied in or left for the loader to fetch at startup.
 
 ## What the linker does
 
@@ -9023,37 +10588,73 @@ A dynamic build that leaves a dependency as a shared object is smaller on its ow
 
 ## Seeing linking with Go
 
-The following sequence is a Level 1 read that you can run on Linux without any extra setup beyond the toolchain. It makes static, PIE, and dynamic differences concrete for the same tiny program.
+Build `tiny` two ways and compare the dynamic and static results directly. The session below also builds a tiny shared library so you can see PLT/GOT in action.
 
 ```bash
-go build -x -o tiny main.go 2>&1 | grep "link"
-ls -lh tiny
-ldd tiny 2>&1 | head -n 10
-nm -g tiny 2>&1 | grep -E " main\.| os\." | head
+echo "== build 1: default (dynamic-capable, pure-Go EXEC) =="
+go build -o tiny_dyn main.go
+ls -lh tiny_dyn
+file tiny_dyn
+ldd tiny_dyn
+# tiny_dyn: ELF 64-bit LSB executable, statically linked (Go)
+#         not a dynamic executable        <-- no libc needed (CGO_ENABLED=0)
+
+echo "== build 2: fully static =="
+CGO_ENABLED=0 go build -ldflags '-extldflags "-static"' -o tiny_static main.go
+ls -lh tiny_static
+file tiny_static
+ldd tiny_static
+# tiny_static: ELF 64-bit LSB executable, statically linked
+#         not a dynamic executable
+
+echo "== build 3: dynamic, needs libm via cgo =="
+CGO_ENABLED=1 go build -o tiny_cgo main.go
+ldd tiny_cgo
+#         linux-vdso.so.1 (0x...)
+#         libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x...)
+#         libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x...)
+#         /lib64/ld-linux-x86-64.so.2 (0x...)
+# Static vs dynamic: dynamic shows NEEDED libc; static shows none.
+
+echo "== PLT/GOT in a dynamic binary (tiny_cgo) =="
+readelf -d tiny_cgo | grep NEEDED
+objdump -d --no-show-raw-insn tiny_cgo | grep -A3 '<puts@plt>:' | head
+# 00000000004a0000 <puts@plt>:
+#     endbr64
+#     jmp    *0x...(%rip)        ; GOT entry, patched by loader
+#     push   $0x0                ; lazy-binding id
+#     jmp    0x... <_dl_runtime_resolve>   ; first call resolves symbol
+# The PLT stub jumps through a GOT entry; the loader fills it on first use.
 ```
 
-What it demonstrates is that `go build` invokes `link` after compiling the packages. The `ldd` line shows whether any shared objects are needed. The `nm` lines show global symbols that the linker kept, like `main.main`.
-
-A Level 2 exercise compares visibility and size.
+To make PLT/GOT concrete with a Go-built shared object, compile a small helper into a `.so` and call it:
 
 ```bash
-go build -o tiny.base main.go
-go build -ldflags="-s -w" -o tiny.stripped main.go
-go build -buildmode=pie -o tiny.pie main.go
-ls -lh tiny.base tiny.stripped tiny.pie
-size tiny.base tiny.stripped tiny.pie
-readelf --dynsym tiny.pie 2>&1 | head -n 20
+# hello/hello.go  (a tiny shared library)
+# package hello
+# import "fmt"
+# func Greet(name string) { fmt.Println("hi", name) }
+
+echo "== build a Go shared library =="
+go build -buildmode=c-shared -o libhello.so hello/hello.go
+ls -lh libhello.so
+readelf -h libhello.so | grep Type
+# libhello.so: ELF 64-bit LSB shared object, dynamically linked
+nm -D libhello.so | grep Greet
+# 00000000000a1200 T Greet   <-- exported dynamic symbol
+
+echo "== a main that links against it (performs a PLT call) =="
+# package main
+# // #cgo LDFLAGS: -L. -lhello
+# import "C"
+# func main() { C.Greet(C.CString("tiny")) }
+go build -o tiny_use_so main_use_so.go
+ldd tiny_use_so
+#         libhello.so => not found  (must be on LD_LIBRARY_PATH at runtime)
+# If libhello.so is missing at startup, the loader fails before main runs.
 ```
 
-You will typically see that the stripped file loses `.symtab` and `.debug_*` sections, the PIE file has type `DYN` but is still executable, and the dynamic symbol table lists only the symbols that need to be visible to the loader. The difference between `size` for the three files shows how much of the file is code that will be mapped as executable and how much is data that will be writable.
-
-To see link order, you can force the toolchain to show the link line and read it.
-
-```bash
-go build -x -o tiny main.go 2>&1 | grep -E "compile|link"
-```
-
-The line that starts with `link` lists the objects and archives in the order the linker sees them. If you built a small helper as an archive with `go tool pack`, swapping its position relative to the object that uses it would change which members are extracted, which is why the order is part of the contract, not just aesthetics.
+What the session shows is the central linking choice. `tiny_dyn` and `tiny_static` are both self-contained for Go code (`ldd` reports `not a dynamic executable`), but only the `CGO_ENABLED=1` build needs `libc` at runtime and exposes the PLT/GOT indirection. The `c-shared` library makes the dynamic story explicit: it is an `ELF shared object` with an exported `Greet` symbol, and any program that links it will fail to start if that `.so` is absent when the loader runs.
 
 ## A realistic production example
 
@@ -9127,13 +10728,13 @@ It tells you which symbol is undefined. Which library defines that symbol is som
 
 Object files describe what is defined and what is needed. The linker decides where each section will live, matches each needed name with a definition, and patches code and data references that depend on those addresses. Static linking copies the needed code into the executable, while dynamic linking records a shared object to be loaded at startup. Archives are only searched for currently needed symbols, so order matters, and shared objects rely on position-independent code and visibility to be safely mapped at different addresses.
 
-## If you want to build this later
+**Where this leaves us**
 
-Build the tiny program in three ways and record `ls -lh`, `size`, `ldd`, and `readelf -d` for each: a normal `go build -o tiny`, a `go build -ldflags="-s -w" -o tiny.stripped`, and a `go build -buildmode=pie -o tiny.pie`. Then add a small helper package and rebuild, noting which symbols appear in `nm -g` and which disappear when you hide them. Swap the order of an archive you create with `go tool pack` relative to the object that uses it and note when the link fails with an undefined symbol. Write down which artifact you would ship for size, which for debuggability, and which would fail to start if the shared object were missing at runtime.
+`tiny` is now a single executable the linker produced — statically self-contained for Go code, or dynamically dependent on `libc` when `cgo` is on, with PLT/GOT indirection for any shared imports. The next chapter opens that executable's ELF header and watches the kernel map it and run the runtime before `main`.
 
 ## Chapter 27 — Executable Formats and Program Startup
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+In Chapter 26, the linker handed `tiny` back as one resolved executable; now we read that file as the loader sees it — the ELF header, the `LOAD` segments, and the `_start`/runtime path — and watch the kernel map `tiny` and jump to its entry point before `main.main` ever runs.
 
 ## From object to executable
 
@@ -9290,6 +10891,92 @@ checksec --file=tiny 2>&1 | head -n 20
 
 What it demonstrates is not just file size. The PIE file is built to allow randomization, and the `GNU_STACK` line shows `RWE` versus `RW` and whether the stack is executable. Stripping with `-s -w` does not change these load properties. It removes the section names and debug information that tools use to show you source, but the loader still maps the same segments.
 
+## A minimal startup in assembly, without a runtime
+
+To see what a runtime like Go's normally does for you, here is a tiny `startup.asm` that replaces the runtime entirely. It does not call `os.ReadFile`; instead it writes a fixed buffer and exits, so you can watch `execve` map it and the kernel run `_start` with no Go scheduler in between.
+
+```nasm
+; startup.asm — AT&T/NASM-flavored x86-64, no runtime
+; Build: nasm -f elf64 startup.asm && ld -o tiny_asm startup.o
+section .data
+    msg db "tiny started without a runtime", 10
+    len equ $ - msg
+
+section .text
+global _start
+_start:
+    ; write(1, msg, len)  — syscall 1 on x86-64 Linux
+    mov    rax, 1          ; SYS_write
+    mov    rdi, 1          ; fd = stdout
+    lea    rsi, [rel msg]  ; buffer
+    mov    rdx, len        ; count
+    syscall
+
+    ; exit(0) — syscall 60
+    mov    rax, 60         ; SYS_exit
+    xor    rdi, rdi        ; status 0
+    syscall
+```
+
+```bash
+nasm -f elf64 startup.asm -o startup.o
+ld -o tiny_asm startup.o
+ls -lh tiny_asm
+file tiny_asm
+readelf -h tiny_asm | grep -E "Type|Entry"
+# tiny_asm: ELF 64-bit LSB executable, x86-64, statically linked
+# Type: EXEC
+# Entry point address: 0x401000
+
+echo "== kernel mapping it at startup =="
+strace -e trace=execve,write,exit_group ./tiny_asm 2>&1 | head
+# execve("./tiny_asm", ["./tiny_asm"], 0x...) = 0
+# write(1, "tiny started without a runtime\n", 31) = 31
+# exit_group(0) = ?
+```
+
+The assembly version makes the startup contract visible: `ld` sets `e_entry` to `_start`, the kernel maps the single `LOAD` segment, and control goes straight to your code. Go's `tiny` does the same thing, except its `_start` (`_rt0_amd64_linux`) first builds the runtime world before calling `main.main`.
+
+## An annotated ELF/startup session for tiny
+
+The substantial walkthrough below reads `tiny`'s ELF header and program headers, then traces the kernel mapping it:
+
+```bash
+go build -o tiny main.go
+
+echo "== ELF header =="
+readelf -h tiny | grep -E "Type|Machine|Entry|Start of"
+# Type:                            EXEC (Executable file)
+# Machine:                         Advanced Micro Devices X86-64
+# Entry point address:             0x458940
+# Start of program headers:       64 (bytes into file)
+# Start of section headers:       123456 (bytes into file)
+
+echo "== program headers (segments the loader maps) =="
+readelf -l tiny | sed -n '1,18p'
+# Program Headers:
+#   Type           Offset   VirtAddr   PhysAddr   FileSiz  MemSiz   Flg Align
+#   LOAD           0x000000 0x00400000 0x00400000 0x1a0000 0x1a0000 R E 0x1000
+#   LOAD           0x1a0000 0x005a1000 0x005a1000 0x020000 0x024000 RW  0x1000
+#   NOTE           0x....   0x....     0x....     0x....   0x....         0x4
+#   GNU_STACK      0x000000 0x00000000 0x00000000 0x00000  0x00000  RW  0x10
+#   GNU_RELRO      0x....   0x....     0x....     0x....   0x....   R   0x1
+# First LOAD is R E (read+execute) code; second LOAD is RW data.
+# No PT_INTERP => statically linked pure-Go, kernel starts it directly.
+
+echo "== kernel maps and runs it =="
+strace -e trace=execve ./tiny 2>&1 | head -n 3
+# execve("./tiny", ["./tiny"], 0x7ffd...) = 0
+# (the kernel maps the LOAD segments, jumps to e_entry 0x458940)
+
+echo "== entry is the runtime, not main =="
+go tool objdump -s "runtime._rt0_amd64_linux" tiny 2>&1 | head -n 6
+readelf -h tiny | grep Entry
+# runtime._rt0_amd64_linux sets up TLS/args/GC, then calls main.main
+```
+
+The session closes the loop from Part I. `tiny` is now a file the kernel maps: `readelf -h` shows `Type EXEC` and the entry point, `readelf -l` shows the `LOAD` segments it maps as `R E` and `RW`, and `strace` shows the `execve` that places those segments and jumps to the runtime's `_start`. Only after the runtime initializes does `main.main` read `TINY_FILE` and print it.
+
 ## A realistic production example
 
 A team shipped a Go service as a container image built from `scratch`. They built the binary on their laptops with `CGO_ENABLED=1` and `go build -o tiny`, which on their machines was dynamically linked against the host's `glibc`. The binary ran locally, but in the `scratch` container it failed immediately with `no such file or directory` from `execve`. The file was clearly there when they listed the image, so they first thought the image was corrupt.
@@ -9360,20 +11047,20 @@ It maps segments from the file, places arguments and environment on the stack, a
 
 Source text becomes an executable through headers that say what kind of file it is, sections that keep code, data, and debug information separate, a symbol table and relocations that the linker resolved, and, when needed, a dynamic section that names shared objects and tables for lazy binding. ELF on Linux, PE on Windows, and Mach-O on macOS all describe the same ideas with different tables. At startup the kernel maps the `LOAD` segments, sets up argument, environment, and auxiliary values on the stack, jumps to the entry in the runtime, and the runtime initializes before calling the `main` you wrote. Hardening like PIE for ASLR, non-executable memory, and stack canaries is visible in the same headers.
 
-## If you want to build this later
+**Where this leaves us**
 
-Build the tiny program four ways and record `file`, `readelf -h`, `readelf -l`, `readelf -S`, `ldd`, and `size` for each: a normal `go build -o tiny`, a pie `go build -buildmode=pie -o tiny.pie`, a stripped `go build -ldflags="-s -w" -o tiny.stripped`, and a cross `GOOS=windows go build -o tiny.exe` or `GOOS=darwin go build -o tiny.macho`. Compare `Type: EXEC` versus `DYN`, note where `PT_INTERP` appears, and note which file has no `.debug_info`. Run `strace -e execve ./tiny` and note the `execve` arguments, then break in `gdb` at `main.main` and walk the initial stack that holds `argc` and `envp`. Keep the unstripped ELF for debugging and ship the stripped or pie binary, and write down which header field made each choice possible.
-
+`tiny` is now a complete ELF the kernel maps and starts: its `LOAD` segments become `tiny`'s address space, the runtime initializes at the entry point, and only then does `main.main` read `TINY_FILE` and print it. In Part V, `tiny` becomes something the kernel isolates — a process with its own address space — and we look at how multiple such processes run, communicate, and are kept alive.
 # Part V — Processes, Threads, and Concurrency Models
 
-A single process can only do one thing at a time without more workers. The model you choose decides what is shared, where failure stops, and whether the bottleneck is CPU, waiting, or coordination.
+So far `tiny` has been a single process that reads `TINY_FILE` and prints it. A single process can only do one thing at a time without more workers, so this part of the book takes that one program and splits it into processes, threads, and pipelines to show what each model shares and what each isolates. The model you choose decides what is shared, where failure stops, and whether the bottleneck is CPU, waiting, or coordination. Chapter 28 shows `tiny` running as separate processes that communicate only through a pipe, demonstrating isolation and inter-process communication. Chapter 29 keeps `tiny` in one process but splits it across threads that share memory and need locks. Chapter 30 pins those threads to CPUs and NUMA nodes to expose where memory is local or remote. Chapter 31 implements the same `tiny` task three ways — threads, separate processes, and an async event loop — to compare concurrency models. Chapter 32 turns `tiny` into a bounded pipeline with backpressure and a single cancellable context.
 
 ---
 
 
 ## Chapter 28 — Process Isolation and Lifecycle
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+In Chapter 27 we followed `tiny` from its Go source all the way to the ELF image the kernel loads and starts at `_start`. Now we take that single running process and split `tiny` into multiple processes — a producer that reads `TINY_FILE` and a consumer that prints it — so we can see how the kernel isolates their address spaces and how they still talk through a pipe.
+
 
 ## What isolation means
 
@@ -9562,55 +11249,104 @@ A pool gives you strong isolation. Each worker has its own address space, its ow
 Go's `os/exec` can build a simple pool. The main process starts a fixed number of children, sends each a task on its standard input or through a pipe, and reads results back, while a supervisor watches for exits.
 
 ```go
+// tiny as two processes: a producer that reads TINY_FILE and a consumer
+// that prints it. The only shared channel is an os.Pipe; each process keeps its
+// own address space, so this demonstrates isolation and IPC.
+//
+// Build: go build -o tiny .
+// Run (this binary starts a consumer copy of itself):
+//   TINY_FILE=message.txt ./tiny
 package main
 
 import (
-    "bufio"
-    "fmt"
-    "os"
-    "os/exec"
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
 )
 
-func startWorker(id int) *exec.Cmd {
-    cmd := exec.Command(os.Args[0], "-worker")
-    cmd.Env = append(os.Environ(), fmt.Sprintf("WORKER_ID=%d", id))
-    stdin, _ := cmd.StdinPipe()
-    cmd.Stdout = os.Stdout
-    cmd.Stderr = os.Stderr
-    cmd.Start()
-    // tiny protocol: one line per task
-    go func() {
-        defer stdin.Close()
-        w := bufio.NewWriter(stdin)
-        for i := 0; i < 5; i++ {
-            fmt.Fprintf(w, "task %d\n", i)
-        }
-        w.Flush()
-    }()
-    return cmd
+// consumer prints every line it receives on its standard input, proving it
+// lives in a separate address space from the producer.
+func consumer() {
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		fmt.Println(sc.Text())
+	}
+	if err := sc.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "consumer read: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// producer reads TINY_FILE and writes each line to w.
+func producer(w *os.File) {
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	// show that producer and consumer are distinct processes
+	fmt.Fprintf(os.Stderr, "producer pid %d\n", os.Getpid())
+
+	bw := bufio.NewWriter(w)
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if _, err := bw.WriteString(sc.Text() + "\n"); err != nil {
+			fmt.Fprintf(os.Stderr, "producer write: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "producer read %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	if err := bw.Flush(); err != nil {
+		fmt.Fprintf(os.Stderr, "producer flush: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func main() {
-    if len(os.Args) > 1 && os.Args[1] == "-worker" {
-        s := bufio.NewScanner(os.Stdin)
-        for s.Scan() {
-            fmt.Printf("worker %s handled %s\n", os.Getenv("WORKER_ID"), s.Text())
-        }
-        return
-    }
-    // supervisor part
-    var cmds []*exec.Cmd
-    for i := 0; i < 3; i++ {
-        cmds = append(cmds, startWorker(i))
-    }
-    for _, c := range cmds {
-        c.Wait()
-        fmt.Printf("worker pid %d finished with %v\n", c.Process.Pid, c.ProcessState)
-    }
+	// the consumer is a second copy of this binary, run as a child process
+	if len(os.Args) > 1 && os.Args[1] == "-consumer" {
+		consumer()
+		return
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pipe: %v\n", err)
+		os.Exit(1)
+	}
+
+	cmd := exec.Command(os.Args[0], "-consumer")
+	cmd.Stdin = r          // child reads what the parent writes
+	cmd.Stdout = os.Stdout // child prints to the terminal
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "start consumer: %v\n", err)
+		os.Exit(1)
+	}
+	// the parent must close its copy of the read end so EOF reaches the child
+	r.Close()
+
+	producer(w)
+	w.Close() // signal end-of-file to the consumer
+
+	if err := cmd.Wait(); err != nil {
+		fmt.Fprintf(os.Stderr, "consumer exited: %v\n", err)
+		os.Exit(1)
+	}
 }
 ```
 
-The important lines are `StdinPipe` and `Wait`. `StdinPipe` creates a pipe that the parent can write to and the child reads as its standard input. `Wait` is the parent's way to avoid a zombie and to learn whether the worker exited cleanly or due to a signal. A real pool adds a deadline on shutdown, where the supervisor first closes the pipe to signal no more tasks, waits with a timeout, and only then sends `SIGTERM` to the workers' process group.
+The important lines are `os.Pipe`, `cmd.Start`, and `cmd.Wait`. `os.Pipe` gives the producer and consumer their only shared channel; `cmd.Start` runs the consumer as a separate process with its own address space, and `cmd.Wait` lets the parent reap it and learn how it exited. Closing the writer's end is what delivers end-of-file to the child, so a missing `Close` would hang the consumer.
 
 ### Which parts are copied and which are shared
 
@@ -9780,16 +11516,15 @@ Most of its memory has been reclaimed. Only a small record with the exit status 
 Isolation has a cost in file descriptors, address space, and communication. Inside one service, threads or events that share an address space are often cheaper when isolation is not the primary need.
 
 ## Summary
-
 A process gives you a container with its own virtual addresses, its own table of file descriptors, and a lifecycle that the kernel tracks from creation through exit. `fork` or `clone` creates a child that starts as a copy, `exec` replaces the program in a process while keeping its identity, and `wait` lets a parent collect a child's status and avoid a zombie. Parent and child relationships shape reparenting, process groups, and who is signaled. Supervision with a manager adds restart policy, resource limits, and a deadline for shutdown, and a process pool uses that supervision to bound concurrency while keeping strong isolation between workers.
 
-## If you want to build this later
 
-Build a small process pool that starts three workers and keeps them. The supervisor should create each worker with a pipe for tasks, mark file descriptors close-on-exec, and wait for any child that exits to replace it. Add a mode where a worker is killed with a signal and watch the supervisor restart it. Then add a graceful shutdown where the supervisor closes the task pipes, waits up to five seconds, and only then sends `SIGTERM` to the workers' process group. Write down where a descriptor leak would show in `/proc/<pid>/fd` and where a missing `wait` would show `Z` in `ps`.
+**Where this leaves us** After this chapter `tiny` no longer has to run as one box. We have seen it split into a producer process that reads `TINY_FILE` and a consumer process that prints it, with the kernel keeping their address spaces apart and a pipe as the only bridge between them. Chapter 29 keeps the same job but collapses it into one process, where the threads share memory and the problem becomes protecting that shared state instead of copying it across a boundary.
 
 ## Chapter 29 — Threads and Shared Execution State
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 28 showed `tiny` as separate processes that could only share data by copying bytes through a kernel pipe. Here we turn `tiny` inside out: we keep it as one process but give it many threads that share the same address space, so the challenge becomes protecting shared state with locks instead of copying across a boundary.
+
 
 ## User threads and kernel threads
 
@@ -9824,35 +11559,84 @@ The shared file descriptor table is a subtle case. Two threads share the same in
 A simple program makes the sharing concrete. Two goroutines increment a counter without coordination.
 
 ```go
+// tiny as a multi-threaded program: N worker goroutines each read a chunk of
+// TINY_FILE into a shared buffer. The shared buffer is guarded by a sync.Mutex,
+// which is the cost of sharing an address space instead of copying across a pipe.
+//
+// Build: go build -o tiny .
+// Run:   TINY_FILE=message.txt ./tiny
 package main
 
 import (
-    "fmt"
-    "sync"
+	"fmt"
+	"io"
+	"os"
+	"sync"
 )
 
+const workers = 4
+
 func main() {
-    var counter int
-    var wg sync.WaitGroup
-    wg.Add(2)
-    go func() {
-        for i := 0; i < 100000; i++ {
-            counter++
-        }
-        wg.Done()
-    }()
-    go func() {
-        for i := 0; i < 100000; i++ {
-            counter++
-        }
-        wg.Done()
-    }()
-    wg.Wait()
-    fmt.Println(counter)
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "stat %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	size := info.Size()
+	if size == 0 {
+		return
+	}
+
+	// shared state: one buffer that every worker appends to
+	var (
+		mu     sync.Mutex
+		buffer []byte
+		wg     sync.WaitGroup
+	)
+
+	chunk := (size + workers - 1) / workers // ceil(size/workers)
+	for i := 0; i < workers; i++ {
+		start := int64(i) * chunk
+		end := start + chunk
+		if end > size {
+			end = size
+		}
+		if start >= end {
+			break
+		}
+		wg.Add(1)
+		go func(lo, hi int64) {
+			defer wg.Done()
+			part := make([]byte, hi-lo)
+			if _, err := f.ReadAt(part, lo); err != nil && err != io.EOF {
+				fmt.Fprintf(os.Stderr, "read %s [%d:%d]: %v\n", path, lo, hi, err)
+				os.Exit(1)
+			}
+			// the mutex serializes access to the shared buffer
+			mu.Lock()
+			buffer = append(buffer, part...)
+			mu.Unlock()
+		}(start, end)
+	}
+
+	wg.Wait()
+	// workers have all returned; no lock needed now
+	os.Stdout.Write(buffer)
 }
 ```
 
-The variable `counter` is in shared heap memory. The two goroutines run concurrently and each does a read, an add, and a write. Without synchronization the final value is not reliably `200000`. The program has no defined meaning for that access in the Go memory model, and the race detector can find it.
+The shared buffer lives in the heap, and every worker goroutine writes into it after locking the same `sync.Mutex`. With the lock present the writes are serialized, so the final buffer holds every chunk exactly once; without it two workers could overwrite the same region and the result would be lost or torn. The race detector can find the unsynchronized version directly.
 
 ## Thread-local storage
 
@@ -10113,16 +11897,15 @@ The name is the same, but each thread has its own copy. A write in one thread do
 The descriptor table is shared. Closing in one thread affects every other thread that shares it, and a new descriptor can reuse the same number, so a later operation may act on the wrong file.
 
 ## Summary
-
 A process gives you an isolated address space. Threads give you many execution paths inside that space. Kernel threads are what the kernel schedules, while user threads like goroutines are what the runtime schedules onto them. By default, memory is shared, with a thread's stack and its thread-local storage as the places that are private. Pools bound how many threads can run at once, and exhaustion shows up as waiting, rejection, or growth in memory and queueing. The safe pattern for shutdown is cooperative, where a thread is asked to stop and chooses a safe point to return.
 
-## If you want to build this later
 
-Extend the tiny program so the main goroutine creates a fixed worker pool with a bounded channel. Make the workers touch a shared map, first with a race and then with a correct synchronization where only one goroutine mutates the map. Add a mode where each worker increments a per-goroutine counter in thread-local-like storage and a separate aggregator merges them. Run with `go run -race` to see the race, with `ps` to see kernel threads versus `runtime.NumGoroutine`, and with a blocked downstream to see queue growth. Then add a cancellable context so the main function can signal shutdown and each worker drains or discards pending tasks before returning.
+**Where this leaves us** With Chapter 29, `tiny` is a multi-threaded program in which many workers read the same file into a shared buffer guarded by a mutex. It now demonstrates that sharing is the default inside a process and that coordination, not copying, is the cost of concurrency. Chapter 30 takes those same `tiny` threads and asks the scheduler where they run, pinning them to CPUs and NUMA nodes so we can measure how local or remote their memory really is.
 
 ## Chapter 30 — Scheduling, Affinity, and NUMA Effects
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 29 let many `tiny` threads share one address space and compete for the same lock. This chapter pins those threads to CPUs and nodes, asking where each thread runs and where the memory it touches actually lives, because on a NUMA machine local versus remote access changes the cost of the same instruction.
+
 
 ## How the scheduler sees the machine
 
@@ -10166,24 +11949,103 @@ The first line shows the process and which CPU its threads last ran on. The seco
 In Go you can keep a goroutine on a fixed kernel thread for a short section.
 
 ```go
+// tiny with NUMA-aware workers: threads are pinned to CPUs on different NUMA
+// nodes, and a buffer is allocated local or remote to the thread that touches
+// it. The program reports local versus remote access latency, which is the
+// observable cost of where memory physically lives.
+//
+// Build: go build -o tiny .
+// Run:   TINY_FILE=message.txt ./tiny   (best on a two-node machine)
 package main
 
 import (
-    "runtime"
-    "sync"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
-func pinnedWork(wg *sync.WaitGroup) {
-    defer wg.Done()
-    runtime.LockOSThread()
-    defer runtime.UnlockOSThread()
-    // work that benefits from staying on this thread, like touching a per-CPU structure
-    for i := 0; i < 1000000; i++ {
-    }
+// cpusForNode returns one CPU id for the given NUMA node by reading sysfs.
+func cpusForNode(node int) (int, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/sys/devices/system/node/node%d/cpulist", node))
+	if err != nil {
+		return -1, false
+	}
+	var cpu int
+	fmt.Sscanf(string(data), "%d", &cpu)
+	return cpu, true
+}
+
+// touch allocates and warms a buffer while the caller is pinned, so the pages
+// are placed on the node local to the current CPU (first-touch policy).
+func touch(n int) []byte {
+	b := make([]byte, n)
+	for i := 0; i < n; i += 4096 {
+		b[i] = 1
+	}
+	return b
+}
+
+// timeAccess measures the cost of walking a buffer that may be local or remote.
+func timeAccess(b []byte) time.Duration {
+	start := time.Now()
+	sum := 0
+	for i := 0; i < len(b); i += 64 {
+		sum += int(b[i])
+	}
+	_ = sum
+	return time.Since(start)
+}
+
+func pin(cpu int) {
+	var set unix.CPUSet
+	set.Set(cpu)
+	_ = unix.SchedSetaffinity(0, &set)
+}
+
+func main() {
+	const bytes = 32 << 20 // 32 MiB
+	cpu0, ok0 := cpusForNode(0)
+	cpu1, ok1 := cpusForNode(1)
+	if !ok0 || !ok1 {
+		fmt.Fprintln(os.Stderr, "need a two-node NUMA machine to show the effect")
+		return
+	}
+
+	var wg sync.WaitGroup
+	var localNs, remoteNs int64
+
+	// local: allocate and access on the same node
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pin(cpu0)
+		b := touch(bytes) // pages placed on node 0 (first touch)
+		localNs = int64(timeAccess(b))
+	}()
+
+	// remote: allocate on node 0, then access from a thread pinned to node 1
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pin(cpu0)
+		b := touch(bytes) // pages placed on node 0
+		pin(cpu1)         // now run on node 1 -> remote access
+		remoteNs = int64(timeAccess(b))
+	}()
+
+	wg.Wait()
+	fmt.Printf("local  access: %v for %d MiB\n", time.Duration(localNs), bytes>>20)
+	fmt.Printf("remote access: %v for %d MiB\n", time.Duration(remoteNs), bytes>>20)
+	if remoteNs > localNs {
+		fmt.Printf("remote is %.2fx slower\n", float64(remoteNs)/float64(localNs))
+	}
 }
 ```
 
-`LockOSThread` says the current goroutine should stay on its current kernel thread, and the thread stays where the scheduler placed it, subject to the process's affinity. A matching `UnlockOSThread` lets the goroutine move again. The pattern is useful around code that uses thread-local storage or a device queue that is per CPU.
+`unix.SchedSetaffinity` pins each worker to a specific CPU, while the allocator's first-touch policy decides whether the buffer it allocates is local or remote to that CPU. The program then times the same read from each placement and prints local versus remote latency, which is the observable difference NUMA makes. Pinning is what makes the comparison fair: without it the scheduler could move a worker between nodes and hide the effect.
 
 Pinning helps when you know that a thread and a device queue share a cache domain, or when you want to keep a latency-sensitive thread away from noisy neighbors. It hurts when the pinned CPU becomes the bottleneck while other CPUs could have taken the work, or when a pinned thread touches memory that is far away on a NUMA machine.
 
@@ -10471,16 +12333,15 @@ The scheduling class is one part. Page faults, interrupts, and locks shared with
 Moving a thread helps balance, but it also makes the new CPU miss in its caches. Balance helps when a CPU is idle, but not when the cost of moving exceeds the wait it avoids.
 
 ## Summary
-
 Scheduling chooses which runnable thread runs on which CPU, affinity restricts where a thread may run, and NUMA says which memory is near which CPU. Load balancing moves work to keep the machine even, pinning keeps work near its data, and the two can conflict. Priority inversion, starvation, and real-time deadlines are the failure modes that appear when priority and placement are chosen poorly. The right choice is not a fixed rule about pinning or priority. It is where the working set lives, how long a thread holds a shared resource, and whether moving work helps balance more than it hurts locality.
 
-## If you want to build this later
 
-Write a program that can start a fixed number of workers that each touch a few megabytes of private buffer and also update a shared counter. First run it with no affinity and record time, `perf` cache misses, and migrations. Then pin the workers to one socket with `taskset` and repeat. Then partition the workers per socket with separate buffers and compare again. Add a mode that binds memory with `numactl --membind` to the local versus remote node. The goal is to see when keeping work near its memory helps, when pinning hurts balance, and how removing a single shared lock changes the picture more than any affinity.
+**Where this leaves us** Chapter 30 leaves `tiny` as a set of worker threads pinned across NUMA nodes, where the same read shows different latency depending on whether its memory is local or remote. It demonstrates that placement, not just the number of threads, decides performance on a multi-socket machine. Chapter 31 steps back and rebuilds the same `tiny` read-and-respond task three ways — threads, separate processes, and an async event loop — to make the tradeoff between isolation and overhead explicit.
 
 ## Chapter 31 — Threads, Processes, Async I/O, and Event Loops
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 30 placed `tiny`'s threads carefully on sockets to keep their memory local. Now we step back and implement the same `tiny` read-and-respond task three ways — kernel threads, separate processes, and a single-threaded async event loop — to compare what each model shares, isolates, and pays for.
+
 
 ## Multi-threading
 
@@ -10510,27 +12371,142 @@ A multi-process program runs many processes instead of many threads. Each proces
 Communication must be explicit. A parent can create a pipe and fork children that inherit it, it can create a socket pair, or it can map a shared file. All of those require a system call to set up, and the program must decide on a protocol for bytes, ordering, and who closes which end.
 
 ```go
+// tiny implemented three ways, doing the same read+respond job:
+//   (a) kernel/user threads (goroutines) sharing one address space,
+//   (b) separate processes started with os/exec and joined by a pipe,
+//   (c) a single-threaded async event loop driven by a channel selector.
+// The program prints how long each model takes for the same work.
+//
+// Build: go build -o tiny .
+// Run:   TINY_FILE=message.txt ./tiny
 package main
 
 import (
-    "fmt"
-    "os"
-    "os/exec"
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
+	"sync"
+	"time"
 )
 
+func readLines(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var lines []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		lines = append(lines, sc.Text())
+	}
+	return lines, sc.Err()
+}
+
+// (a) threads: N goroutines read from a shared channel and append to a slice
+// guarded by a mutex.
+func withThreads(path string, n int) time.Duration {
+	lines, err := readLines(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	start := time.Now()
+	ch := make(chan string, len(lines))
+	for _, l := range lines {
+		ch <- l
+	}
+	close(ch)
+
+	var (
+		wg  sync.WaitGroup
+		mu  sync.Mutex
+		out []string
+	)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for l := range ch {
+				mu.Lock()
+				out = append(out, "t:"+l)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return time.Since(start)
+}
+
+// (b) processes: a child copy of this binary reads TINY_FILE and the parent
+// times the exec + wait.
+func withProcesses(path string) time.Duration {
+	start := time.Now()
+	cmd := exec.Command(os.Args[0], "-child")
+	cmd.Env = append(os.Environ(), "TINY_FILE="+path)
+	cmd.Stdout = os.Stdout
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return time.Since(start)
+}
+
+// (c) async event loop: one goroutine selects on a work channel and a done
+// channel, processing tasks without spawning extra workers.
+func withEventLoop(path string) time.Duration {
+	lines, err := readLines(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	start := time.Now()
+	work := make(chan string, len(lines))
+	done := make(chan struct{})
+	go func() {
+		var out []string
+		for {
+			select {
+			case l, ok := <-work:
+				if !ok {
+					_ = out
+					done <- struct{}{}
+					return
+				}
+				out = append(out, "e:"+l) // handle the event to completion
+			}
+		}
+	}()
+	for _, l := range lines {
+		work <- l
+	}
+	close(work)
+	<-done
+	return time.Since(start)
+}
+
 func main() {
-    r, w, _ := os.Pipe()
-    cmd := exec.Command(os.Args[0], "-child")
-    cmd.Stdin = r
-    cmd.Stdout = os.Stdout
-    cmd.Start()
-    fmt.Fprintln(w, "task")
-    w.Close()
-    cmd.Wait()
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
+	// child mode for the process version
+	if len(os.Args) > 1 && os.Args[1] == "-child" {
+		lines, _ := readLines(path)
+		for _, l := range lines {
+			fmt.Println(l)
+		}
+		return
+	}
+
+	fmt.Printf("threads : %v\n", withThreads(path, 4))
+	fmt.Printf("processes: %v\n", withProcesses(path))
+	fmt.Printf("eventloop: %v\n", withEventLoop(path))
 }
 ```
 
-The pipe is the shared channel, but the address spaces stay separate. The child inherits a reference to the read end, the parent keeps the write end, and closing the write end lets the child see end of file.
+Each strategy in the program shares `tiny`'s job differently. The thread version shares the buffer in one address space and pays only for a mutex; the process version shares nothing and copies lines across a pipe; the event-loop version keeps one goroutine and schedules handlers, avoiding both locks and process boundaries. The printed timings show which model does the same work with the least overhead for this workload.
 
 Processes work well when isolation outweighs sharing cost. A crash in a worker does not take the supervisor with it, and a worker can be started with different privileges, limits, or even a different binary. The tradeoff is that sharing large data costs a copy or a deliberate shared mapping, and the kernel must track more address spaces and page tables.
 
@@ -10799,16 +12775,15 @@ Async code is concurrent by interleaving. It only runs in parallel when the runt
 They are cheap to create, but each has a stack and each holds resources the work needs. An unbounded number of goroutines that each block on a downstream call still exhausts memory and downstream capacity.
 
 ## Summary
-
 Threads share an address space and communicate cheaply, but every shared access must be coordinated. Processes share little and communicate through kernel objects, so they isolate failures better at the cost of explicit messages. An event loop avoids preemptive races by running one handler at a time, but handlers must not block. Async runtimes suspend rather than block, coroutines and green threads make many tasks cheap by letting the language schedule them, and actors avoid shared state by using messages. Structured concurrency adds the ownership rule that a parent waits for its children and controls their cancellation. The right model depends on what is shared, where failure should stop, and whether the work is limited by CPU, by waiting, or by coordination.
 
-## If you want to build this later
 
-Build the tiny program in three forms that do the same work, which is to read a list of files and count lines. Build it with a fixed process pool that communicates through pipes, with a fixed thread pool that shares a queue, and with a single-threaded event loop that uses `epoll` or Go's netpoller to wait for readiness. Measure elapsed time, CPU usage, and the number of kernel threads with `ps`. Kill one worker in each form and note which other work survives. Then add a cancellable context that the main function owns and make each form respect it, and compare how cleanly each shuts down when the context is cancelled while tasks are in flight.
+**Where this leaves us** Chapter 31 shows that `tiny` can do the same work as threads, as processes, or as a single event loop, each with a different blast radius when something fails. It demonstrates that the concurrency model is a choice about what is shared and where a fault stops. Chapter 32 connects these ideas into a pipeline of `tiny` stages joined by bounded queues, with one cancellable context and backpressure that protects the system when producers outrun consumers.
 
 ## Chapter 32 — Queues, Pipelines, Backpressure, and Cancellation
 
-*This chapter continues the same running examples — the tiny command-line program, its compiled form, and its processes and threads — so the chain from the previous chapter stays unbroken.*
+Chapter 31 contrasted three ways `tiny` could handle concurrent work, each with its own failure boundary. Here we compose them into a pipeline: `tiny` becomes a chain of stages connected by bounded queues, with one cancellable context and explicit backpressure that rejects work when the first queue is full.
+
 
 ## Work queues
 
@@ -10855,39 +12830,138 @@ The diagram shows the separation. Each stage can have its own concurrency. Stage
 A pipeline written with goroutines and channels makes the stages visible.
 
 ```go
+// tiny as a bounded pipeline: stage1 reads TINY_FILE, stage2 transforms each
+// line, stage3 writes it. Every stage has its own bounded channel and a fixed
+// number of workers, one cancellable context governs them all, and the first
+// queue applies backpressure by rejecting work the moment it is full.
+//
+// Build: go build -o tiny .
+// Run:   TINY_FILE=message.txt ./tiny
 package main
 
-func stage1(in <-chan string, out chan<- string) {
-    defer close(out)
-    for s := range in {
-        out <- "parsed:" + s
-    }
-}
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+)
 
-func stage2(in <-chan string, out chan<- string) {
-    defer close(out)
-    for s := range in {
-        out <- "compressed:" + s
-    }
-}
+const (
+	q1Cap   = 8
+	q2Cap   = 8
+	stage2W = 2
+	stage3W = 2
+)
 
 func main() {
-    in := make(chan string, 10)
-    mid := make(chan string, 10)
-    out := make(chan string, 10)
+	path := os.Getenv("TINY_FILE")
+	if path == "" {
+		path = "message.txt"
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-    go stage1(in, mid)
-    go stage2(mid, out)
+	q1 := make(chan string, q1Cap)
+	q2 := make(chan string, q2Cap)
 
-    in <- "hello"
-    close(in)
-    for r := range out {
-        _ = r
-    }
+	var (
+		mu         sync.Mutex
+		rejections int
+		waited     time.Duration
+	)
+
+	// stage3: fixed workers write to stdout
+	var wg3 sync.WaitGroup
+	for i := 0; i < stage3W; i++ {
+		wg3.Add(1)
+		go func() {
+			defer wg3.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case s, ok := <-q2:
+					if !ok {
+						return
+					}
+					fmt.Println(s)
+				}
+			}
+		}()
+	}
+
+	// stage2: fixed workers transform q1 -> q2
+	var wg2 sync.WaitGroup
+	for i := 0; i < stage2W; i++ {
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case s, ok := <-q1:
+					if !ok {
+						return
+					}
+					select {
+					case q2 <- ">> " + s:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}()
+	}
+	// when stage1 finishes (q1 closed) and workers drain, close q2
+	go func() {
+		wg2.Wait()
+		close(q2)
+	}()
+
+	// stage1: reader with backpressure on the first queue
+	go func() {
+		defer close(q1)
+		f, err := os.Open(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open %s: %v\n", path, err)
+			return
+		}
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			line := sc.Text()
+			select {
+			case q1 <- line:
+			default:
+				// queue full: reject with a brief wait, then retry once
+				mu.Lock()
+				rejections++
+				mu.Unlock()
+				t0 := time.Now()
+				select {
+				case q1 <- line:
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Millisecond):
+					waited += time.Since(t0)
+				}
+			}
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	fmt.Printf("queue1=%d rejections=%d waited=%v\n", len(q1), rejections, waited)
+	mu.Unlock()
+	cancel()
+	wg3.Wait()
 }
 ```
 
-The important lines are the `defer close(out)` in each stage, which says this stage will not send more after its input ends. The pipeline as a whole finishes when every stage has seen its input close and has closed its output. If a stage fails to close or to handle cancellation, the downstream stage waits forever.
+The important lines are the `select` with `default` in stage1, which rejects a line the moment the first bounded queue is full, and the single `ctx` passed to every stage so a cancel stops them all. Each stage has its own fixed worker count and its own bounded channel, and the program prints queue length, wait time, and rejection count so backpressure is observable. If a stage ignores `ctx.Done()` while blocked on a send, the pipeline can no longer shut down cleanly.
 
 A pipeline can be linear like the example, it can have a fan-out where one input goes to many workers, or a fan-in where many producers feed one consumer. The same queue questions apply at each edge.
 
@@ -11254,12 +13328,10 @@ A timeout is a cancellation that happens because a deadline expired. The same `D
 Handling the signal is one part. Draining the input queues, cancelling in-flight work, waiting for workers, and flushing are what make it graceful. Without the wait, the signal alone still leaks.
 
 ## Summary
-
 A queue is where waiting is stored, a pipeline is a chain of queues and stages, and the capacity of those queues decides whether overload is visible or hidden. A bounded queue forces a choice when it is full, and backpressure is that choice, whether it is to block, reject, or drop. Cancellation tells work that its result is no longer needed, timeouts bound how long to wait, and graceful shutdown is the sequence where the program stops accepting, cancels what is running, waits for that cancellation, and then exits.
 
-## If you want to build this later
 
-Build the tiny pipeline from this article with three stages, each with its own bounded channel and fixed workers, and a single cancellable context that the main function owns. Add metrics for queue length, wait time, busy workers, and how often the program rejected because the first queue was full. Run it with a fast producer and a slow downstream, first with a tiny queue of 1 and a `select` with `default` that rejects, then with a large queue of 10,000 that blocks, and compare memory and tail latency. Add `SIGTERM` handling where the main function closes the input, cancels the context, waits for all workers with a deadline, and only then closes the output and exits. Test the shutdown where tasks are queued, where they are running, and where they are blocked on sending, and note which path would leak without the double select on `ctx.Done()`.
+**Where this leaves us** Chapter 32 turns `tiny` into a pipeline of bounded stages, where a single `context.Context` cancels all of them and a `select` with `default` rejects work the moment the first queue is full. It demonstrates that a queue is where waiting is stored, and that backpressure is a policy you choose rather than a size you hope is big enough. The chain continues in the Epilogue and the next stages (6–18), where `tiny` moves from processes and threads into memory management, filesystems, storage, and the production systems built on top of them.
 
 # Epilogue — Where the Chain Goes Next
 
@@ -11289,43 +13361,3 @@ Each new part will reuse the same tiny programs and will be added to this file, 
 **Address space** — The set of virtual addresses a process may use, translated by page tables to physical pages with per-page permissions.  
 **Atomic operation** — An operation that cannot be seen halfway through by other threads; used for counters and flags, but not sufficient alone to publish surrounding data.  
 **Backpressure** — The policy when a bounded queue is full, such as blocking, rejecting, or dropping, that tells the upstream to slow down.  
-**Bounded queue** — A queue with fixed capacity where a full send must be handled explicitly; an unbounded queue is bounded by memory.  
-**Calling convention / ABI** — The agreement about where arguments and return values live, which registers are preserved, and how stack frames are laid out, so separately compiled code can call each other.  
-**Cancellation** — A cooperative signal, often a `context.Context`, that tells started work its result is no longer needed and it should stop at a safe point.  
-**Cgroup** — Linux control group that accounts for and limits a set of processes together, like a service or container.  
-**Context switch** — Saving one thread's registers and restoring another's so the CPU can run different work; it also loses cache warmth.  
-**Copy-on-write** — Sharing physical pages after `fork` until one side writes, then copying that page.  
-**DMA** — Direct memory access where a device writes directly to RAM and then interrupts, avoiding a CPU copy loop.  
-**ELF / PE / Mach-O** — Executable formats for Linux, Windows, and macOS, each with headers, a section view for tools and a segment view for the loader, and an entry point.  
-**Graceful shutdown** — Stopping acceptance, cancelling or draining in-flight work within a deadline, waiting for workers, then releasing resources.  
-**Happens-before** — The program's guarantee that one operation's effects are visible to another, created by linking a release store with an acquire load that observes it.  
-**Little's Law** — `L = λ × W`, average number in system equals arrival rate times time spent, which ties queue depth to waiting.  
-**MMIO** — Memory-mapped I/O where device registers appear as memory addresses with side effects and uncacheable ordering.  
-**Mmap** — A mapping that makes a file or anonymous memory appear in the address space, with permissions and sharing controlled by the kernel.  
-**NUMA** — Non-uniform memory access where local memory is faster than remote memory on another socket.  
-**Object file** — Per-package compiler output with sections, a symbol table, relocations, and debug info, not runnable until linked.  
-**PLT / GOT** — Procedure Linkage Table and Global Offset Table for lazy binding of shared objects; the loader fills GOT entries on first use.  
-**Relocation** — A record that says patch bytes at an offset once a symbol's final address is known.  
-**Sections vs segments** — Sections are the toolchain's view (`.text`, `.debug_info`), segments are the loader's view (`LOAD` with `R E`/`RW`).  
-**Structured concurrency** — A parent that starts concurrent children waits for them and owns their cancellation.  
-
----
-
-# Appendix B — Progressive Projects Mapped to Parts
-
-The roadmap's projects are intentional deferred labs that reuse the same ideas without becoming homework during limited time.
-
-- **Project 1 — Systems Utility** (after Part I) — `open`/`read`/`write` with `strace`, file descriptors, and tests.
-- **Project 2 — A Small Shell** (after Part II) — `fork`/`exec`/`wait`, pipelines, `close-on-exec`, process groups, and `SIGTERM` drain.
-- **Project 3 — A TCP and UDP Server in Go** (after Stage 9, preview) — compare connection setup, message boundaries, timeouts, and concurrent clients.
-- **Project 4 — A Memory Allocator** (after Stage 6, preview) — splitting/coalescing, alignment, fragmentation, per-thread caches.
-- **Project 5 — A Key-Value Store** (after Stages 6-7, preview) — WAL, recovery, checksums, index, compaction, page cache interaction.
-- **Project 6 — A Replicated Service** (after Stage 13, preview) — replication, leader election, retries with idempotency, and fault injection.
-- **Project 7 — A Production Service** (after Part V, preview) — containers, limits, `systemd`, TLS, metrics/traces, and SLOs.
-- **Project 8 — Incident Simulations** (after Part V, preview) — CPU, memory, disk-full, network loss, and certificate expiry drills.
-
-Use the book for the concepts and the projects for the hours when you have a longer break.
-
----
-
-*End of Parts I–V. The file `SYSTEM_ENGINEERING_BOOK.md` is the book; the files in `_posts` remain as the blog series. Next incremental addition will be Part VI — Memory Management.*

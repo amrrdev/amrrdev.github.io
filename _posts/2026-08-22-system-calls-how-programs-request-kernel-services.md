@@ -1,4 +1,4 @@
----
+﻿---
 mermaid: true
 title: "System Calls: How Programs Request Kernel Services"
 date: 2026-08-22
@@ -11,8 +11,8 @@ series_order: 2
 ---
 
 
-> Stage 2 — Linux and Operating System Internals  
-> Subject area 2.1 — The Operating System Model  
+> Stage 2 :  Linux and Operating System Internals  
+> Subject area 2.1 :  The Operating System Model  
 > Article 2
 
 ## The short version
@@ -27,8 +27,8 @@ Opening a file, creating a process, allocating a memory mapping, or reading from
 
 The previous article gave the OS model overview. This article explains the *mechanism* that implements it.
 
-**Prerequisites:** What the Operating System Provides — the services that need a gate.  
-**Next:** Linux Processes and Lifecycle — the resource that uses those gates to be created.
+**Prerequisites:** What the Operating System Provides :  the services that need a gate.  
+**Next:** Linux Processes and Lifecycle :  the resource that uses those gates to be created.
 
 Later articles will explain the resources that system calls operate on: processes, memory, files, sockets, devices, and scheduling. This article gives us the common path they share.
 
@@ -40,17 +40,6 @@ The kernel runs with privileges that ordinary programs do not have. It can chang
 
 If any program could call arbitrary kernel functions or write directly to kernel memory, one buggy or malicious program could take control of the machine or corrupt every other process. The operating system therefore exposes a narrow, documented interface instead of allowing user code to call internal kernel functions directly.
 
-```mermaid
-flowchart LR
-    App[User-space application] --> Library[Library or runtime wrapper]
-    Library --> Boundary[System-call entry point]
-    Boundary --> Kernel[Kernel implementation]
-    Kernel --> Resource[Protected resource or device]
-    Resource --> Kernel
-    Kernel --> Boundary
-    Boundary --> Library
-    Library --> App
-```
 
 The system-call interface is a contract. It defines the operation number, argument meaning, return-value rules, error behavior, and sometimes blocking or ordering behavior.
 
@@ -86,26 +75,6 @@ This distinction matters when counting system calls or measuring performance. A 
 
 The exact implementation depends on the operating system and architecture, but the path usually looks like this:
 
-```mermaid
-sequenceDiagram
-    participant App as User program
-    participant CPU as CPU
-    participant Entry as Kernel entry code
-    participant Kernel as Kernel subsystem
-    participant Resource as Resource or device
-
-    App->>App: Prepare syscall number and arguments
-    App->>CPU: Execute syscall instruction
-    CPU->>Entry: Switch to privileged kernel entry
-    Entry->>Entry: Save user state and establish kernel state
-    Entry->>Kernel: Dispatch syscall number
-    Kernel->>Kernel: Validate arguments and permissions
-    Kernel->>Resource: Perform or schedule operation
-    Resource-->>Kernel: Result, event, or error
-    Kernel-->>Entry: Return value
-    Entry-->>CPU: Restore user execution state
-    CPU-->>App: Continue after syscall instruction
-```
 
 The operation may complete immediately, or the process may block while waiting for a device, file, socket, lock, timer, or another event. If it blocks, the scheduler can run another thread or process while this one waits.
 
@@ -167,13 +136,6 @@ Consider a call that asks the kernel to read data into a user-provided buffer. T
 
 The kernel cannot simply dereference the pointer as if it were kernel memory. It uses safe access mechanisms to copy data between user and kernel memory or to validate a mapping before accessing it.
 
-```mermaid
-flowchart LR
-    UserBuffer[User-space pointer and length] --> Validate[Kernel validates address, range, and permissions]
-    Validate --> Copy[Copy or safely access data]
-    Copy --> KernelBuffer[Kernel-managed state]
-    KernelBuffer --> Device[Filesystem, socket, or device]
-```
 
 A malicious program may pass an invalid pointer intentionally. A normal program may pass one accidentally because of a bug. The kernel must handle both cases without crashing or exposing protected data.
 
@@ -284,14 +246,6 @@ A file descriptor is a small process-local handle referring to a kernel-managed 
 
 The descriptor is meaningful in the process that owns it. Another process cannot use the same integer as if it automatically referred to the same object. Descriptors can be inherited across process creation, duplicated, or passed to another process through a special IPC mechanism.
 
-```mermaid
-flowchart LR
-    Process[Process descriptor table]
-    Process --> FD3[3]
-    Process --> FD4[4]
-    FD3 --> File[Kernel open file object]
-    FD4 --> Socket[Kernel socket object]
-```
 
 This model explains why closing a descriptor changes what later operations can do and why descriptor leaks eventually cause new system calls to fail.
 
@@ -434,6 +388,44 @@ When an operation behaves unexpectedly, experienced engineers ask:
 
 They use the highest-level explanation that remains accurate, then inspect lower layers when the abstraction no longer explains the result. `strace`, a debugger, metrics, logs, and source code can each answer different parts of the question.
 
+## The virtual dynamic shared object lets some calls skip the trap
+
+The kernel maps a small read-only page of code into every process, called the vDSO, or virtual dynamic shared object. For operations such as `clock_gettime` and `gettimeofday`, the kernel keeps the current time in a memory location that user space can read directly. The wrapper can then compute the answer without ever executing a syscall instruction or entering privileged mode.
+
+This matters because timing calls are extremely frequent. A busy server may ask for the time on every request to stamp logs or enforce deadlines. If each of those calls trapped to the kernel, the cost would dominate small operations. The vDSO turns a potential trap into an ordinary memory read plus a little arithmetic, which is often hundreds of times faster.
+
+Not every call can use this path. Only operations whose answer the kernel can safely publish to user space without further validation or side effects belong in the vDSO. Anything that changes state, touches a device, or depends on identity still needs the real gate.
+
+## io_uring offers an asynchronous alternative to the synchronous gate
+
+Most of this article describes the synchronous model: you issue one call, and it returns when the kernel has an answer, possibly after blocking. io_uring is a Linux interface that changes the shape of the interaction. Instead of trapping per operation, the program and kernel share two ring buffers in memory, a submission queue and a completion queue. The application places requests into the submission ring and later harvests completions from the completion ring, communicating through ordinary memory rather than a syscall for each step.
+
+The benefit appears when a workload makes many I/O operations and does not want to pay a transition per request or juggle many threads or an event loop with epoll. A single `io_uring_enter` call can submit dozens of operations and reap completions, which collapses the per-operation boundary cost. It also supports true asynchronous operations such as buffered reads that would otherwise block.
+
+io_uring is not free and is not always the right tool. The shared rings add setup, memory, and kernel-version dependencies, and early implementations had a larger attack surface. Use it when syscall frequency or blocking behavior is the actual bottleneck, not as a default for every program.
+
+## The cost of crossing the boundary is more than the instruction itself
+
+The instruction to enter the kernel is cheap in isolation, but the surrounding work is what you pay for. The CPU must switch privilege mode, save the user registers it will clobber, and establish a kernel stack. On return it restores state and switches back. None of that is free compared to a plain function call that stays in the same context.
+
+Beyond the register and mode work, the transition disturbs the hardware caches and translation lookaside buffer. Kernel code touches different memory than your function did, so entering the kernel can evict cache lines your application wanted, and the TLB entries that map user pages may be less warm when you return. For very small, frequent calls the data movement and cache effects can outweigh the instruction itself.
+
+This is why batching helps. When one larger read or write replaces many small ones, you pay the transition a few times instead of thousands, and you keep more of your working set in cache between calls.
+
+## seccomp filters the gate before the kernel validates arguments
+
+seccomp is a kernel feature that filters which system calls a process may make. The important detail for a systems engineer is where it sits in the path. A seccomp filter runs when the syscall number is known but before the kernel's normal argument validation and handler execute, and it can reject the call based on the number and even on specific argument values.
+
+The value is containment. A web server that only needs to read files, accept connections, and write logs can be given a policy that blocks everything else, including calls that might be used in an exploit. If an attacker finds a memory bug and tries to call a dangerous operation, the filter denies it at the gate rather than letting the kernel's validation logic decide.
+
+seccomp is one layer, not a complete sandbox. It restricts the interface but does not by itself limit filesystem paths, network destinations, or resource use. Production sandboxes combine it with namespaces, capabilities, and resource limits, which later security articles cover in more detail.
+
+## Tracing with strace has a cost that perf trace can reduce
+
+The strace section earlier showed how useful a trace is for seeing what a program asks of the kernel. What it did not stress is the cost. strace works by asking the kernel to stop the process on every syscall entry and exit so the tracer can inspect it. That forced stop and context interaction can slow a program by an order of magnitude or more, and it changes timing enough that it can hide or invent races.
+
+For lighter observation, perf trace uses the kernel's tracing infrastructure to record syscalls with far less intrusion. It samples and reports without stopping the target on every call, so it is better suited to production-adjacent measurement where you need aggregate counts and latency rather than a precise per-call argument dump. The lesson is the same as with all profiling: use the heaviest tool only when you need its detail, and reach for the lighter one when you only need the shape.
+
 ## Interview definitions
 
 ### What is a system call?
@@ -523,3 +515,4 @@ Build a small Linux system-call observability tool.
 Start with a program that opens a file, reads it in chunks, writes the data to standard output, and closes the file. Trace it with `strace` and compare the source-level operations with the actual calls. Then add buffering, change the chunk size, introduce an error path, and observe how the trace changes.
 
 The goal is to see the difference between library code and kernel requests, understand return values and cleanup, and connect system-call count with performance and resource behavior.
+

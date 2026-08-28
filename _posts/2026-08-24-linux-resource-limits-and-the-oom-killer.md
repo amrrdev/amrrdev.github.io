@@ -1,4 +1,4 @@
----
+﻿---
 mermaid: true
 title: "Linux Resource Limits and the OOM Killer"
 date: 2026-08-24
@@ -10,8 +10,8 @@ stage_order: 2
 series_order: 8
 ---
 
-> Stage 2 — Linux and Operating System Internals  
-> Subject area 2.2 — Scheduling and Resource Control  
+> Stage 2 :  Linux and Operating System Internals  
+> Subject area 2.2 :  Scheduling and Resource Control  
 > Article 8
 
 ## The short version
@@ -34,17 +34,6 @@ Without limits, one program could create processes until the table is full, open
 
 Limits do two things. They stop usage from spreading and breaking the whole machine, and they create a point where the program must decide what to do when it cannot get more. That second point is easy to miss. A limit does not remove failure. It moves failure to a place where the program can reject work, wait with a timeout, or tell an operator.
 
-```mermaid
-flowchart LR
-    Work[New work] --> Use[Uses a resource]
-    Use --> Check{At limit?}
-    Check -->|no| Continue[Continue]
-    Check -->|yes| Policy[Choose a policy]
-    Policy --> Reject[Reject]
-    Policy --> Wait[Wait with deadline]
-    Policy --> Reclaim[Free something]
-    Policy --> Kill[End a task as last resort]
-```
 
 What to do at the limit depends on the resource. Running out of a file descriptor is not handled like running out of memory, and a full queue is not handled like a crashed process.
 
@@ -85,21 +74,6 @@ For example, the descriptor limit is the ceiling while `/proc/<pid>/fd` shows th
 
 The kernel usually just rejects the call that would cross the limit and returns an error that matches the resource.
 
-```mermaid
-sequenceDiagram
-    participant App as Program
-    participant Kernel
-    participant Resource
-    App->>Kernel: ask for resource
-    Kernel->>Kernel: check limit for that process
-    alt still below limit
-        Kernel->>Resource: allocate or open
-        Resource-->>Kernel: handle
-        Kernel-->>App: success
-    else at limit
-        Kernel-->>App: error like EMFILE or EAGAIN
-    end
-```
 
 The program must handle that error. The kernel cannot know whether it should try again, close an old resource, reject a request, or exit. If `accept` fails because descriptors are exhausted, trying again immediately will fail again. The program may need to close idle descriptors, reject new connections, or alert an operator.
 
@@ -117,15 +91,6 @@ The same is true for memory, threads, and temporary files. A local limit does no
 
 A control group, usually called a cgroup, is the kernel's way to track a group of processes together. A cgroup can hold a single service and all its children, a container, or any other set of programs that you want to account for together.
 
-```mermaid
-flowchart TD
-    Machine[Machine] --> Root[Root group]
-    Root --> A[Service A group]
-    Root --> B[Service B group]
-    A --> A1[Worker]
-    A --> A2[Helper]
-    B --> B1[Worker]
-```
 
 Cgroups can account for and control CPU time, memory usage, number of processes, disk I/O, and which devices can be accessed. They are important for containers because a service is rarely one process. If you only track the parent, you miss the workers it started.
 
@@ -149,15 +114,6 @@ Current systems usually use cgroup v2, which has one hierarchy and a set of memo
 
 The kernel does not immediately end a process when memory gets scarce. It first tries to reclaim memory. It can drop clean pages from the file cache, write dirty pages back to disk, swap anonymous pages if swapping is allowed, and shrink kernel caches. Reclaim takes CPU and can make programs slower.
 
-```mermaid
-flowchart TD
-    Need[Need more memory] --> Free{Is there free or reclaimable memory?}
-    Free -->|yes| Done[Allocate]
-    Free -->|no| TryReclaim[Reclaim caches, write back, swap]
-    TryReclaim --> Enough{Did reclaim free enough?}
-    Enough -->|yes| Done
-    Enough -->|no| OOM[Choose a task to end]
-```
 
 A machine can be very slow before any process is ended, because it spends its time reclaiming and paging while throughput falls.
 
@@ -231,6 +187,26 @@ What is appropriate depends on what the program owns. A cache entry can be dropp
 A good limit starts from how the workload actually behaves and what failure mode is acceptable. It helps to ask what the normal and peak usage are, what burst must be handled, what other work shares the machine, what the working set that must stay resident is, what can be reclaimed or dropped, what work can be rejected or delayed, what should happen at the boundary, how quickly the service can scale or restart, what happens when two copies run during a deployment or when a machine fails, and which signal will show the limit is approaching.
 
 A limit chosen from one successful test is rarely enough, because concurrency, data size, traffic shape, background work, and allocator behavior all affect what will be needed in production.
+
+## What memory.max really means as a hard limit
+
+`memory.max` is the hard ceiling for a cgroup, but reaching the number does not by itself end a process. The kernel first tries to reclaim, and only when reclaim cannot bring usage back under the ceiling does the OOM killer run inside that group. A group can sit at or slightly above `memory.max` for a short time while the kernel drops clean pages or swaps anonymous memory, and during that window the workload simply slows rather than dies. The useful mental model is that `memory.max` is the point where the kernel is allowed to kill, not the point where it must kill. You can also write to `memory.reclaim` to ask the kernel to reclaim a given amount from the group on your own schedule, which is a way to shed pressure before the ceiling is reached. If you want earlier, non-lethal action, `memory.high` is where throttling and forced reclaim begin, leaving the hard ceiling as the final safety net.
+
+## Steering the OOM killer with oom_score_adj
+
+The OOM killer picks a victim using a score that starts from memory usage and is then shifted by each process's `oom_score_adj`. Writing `-1000` to that file fully protects a process, which is the right choice for a critical supervisor or a system daemon you never want sacrificed. Writing a positive value instead marks a process as more likely to be chosen, which can be a deliberate decision for a disposable worker or a batch job you would rather lose first. Protecting everything with `-1000` is a mistake, because then the kernel has no useful victim and may keep the machine under pressure or fall back to ending whatever it can. The adjustment is per process and does not propagate to children automatically, so a manager that forks workers must set it on each one if the protection is meant to cover the whole tree.
+
+## What the memory controller actually counts, including the page cache
+
+The cgroup memory controller accounts for anonymous memory such as the heap and stack, file mappings, the page cache, shared pages, kernel data structures, and socket buffers. What surprises people is that the page cache counts toward the group's usage even though most of it is reclaimable, so a service that reads or writes many files can look close to its limit while much of that memory could be dropped. Shared pages are charged under rules that depend on the kernel, and the same physical page can appear in several views, so summing per-process numbers overstates what is physically used. When you debug, expect `memory.current` to include cache you did not allocate directly, and read `memory.stat` to separate anonymous, file, and kernel memory rather than assuming the total is all heap.
+
+## Process and thread limits inside a cgroup with pids.max
+
+The per-process limits described earlier are not the only way to bound how many processes a service can create. cgroup v2 has `pids.max`, which caps the number of processes and threads across the whole group and its children, and it is the limit that matters for a container or a systemd service that is many processes. When `pids.max` is hit, `fork` and `clone` fail with `EAGAIN`, and a service that leaks threads or spawns helpers without bound stops being able to start anything new while its existing work may keep running. This is different from the per-user ulimit on process count, which is applied per login session and can be exhausted by unrelated services that share the same user. A group limit is the one that actually contains a single service, because it counts the workers the service started rather than the identity that started them.
+
+## Which limit actually applies: ulimit, systemd, and cgroup v2
+
+The same resource can be constrained in three places, and the effective bound is the most restrictive of them. A per-process `RLIMIT` set by `ulimit` applies when a program raises its own soft limit or runs under a shell that set one, and `systemd` can set the same kind of limit through unit directives such as `LimitNOFILE` or `MemoryMax` for the service it starts. A cgroup v2 limit applies to the whole group and its children regardless of what each process believes its own limit to be, and common cgroup v2 deployments do not add a separate file-descriptor limit, so the per-process `RLIMIT_NOFILE` is normally what a program hits when it reports too many open files. The practical rule is that the kernel enforces the tightest of the process limit and the cgroup limit, so a service may be killed by `memory.max` even when its own ulimit looked generous, or it may hit `RLIMIT_NOFILE` long before any group-level bound. When a limit is reached, check all three layers before concluding which one fired.
 
 ## Interview definitions
 

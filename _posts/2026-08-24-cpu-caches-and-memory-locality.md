@@ -5,24 +5,18 @@ date: 2026-08-24
 categories: ["System Engineering"]
 tags: [cpu, caches, locality, coherence, false-sharing]
 series: "System Engineering"
-stage: "Stage 3 — Hardware and Computer Architecture"
+stage: "Stage 3 - Hardware and Computer Architecture"
 stage_order: 3
 series_order: 3
 ---
 
-## The short version
+The previous chapter showed how to use cycles, instructions, IPC, branch misses, and cache-related counters to investigate a slowdown. This chapter explains the memory behavior behind those measurements. It is the third chapter of Stage 3.
 
 A CPU can perform arithmetic much faster than main memory can provide new data. Caches reduce this gap by keeping recently used data in small, fast storage close to the processor. When a load instruction asks for an address, the CPU first checks the nearby cache levels. If the data is found, the load is a cache hit. If it is not found, the CPU must obtain it from a slower level or from main memory, which is a cache miss.
 
 Caches work because programs often have locality. Temporal locality means that recently used data is likely to be used again. Spatial locality means that data near a recently used address is likely to be used soon. A loop that reads an array from beginning to end has good spatial locality. A program that repeatedly reuses a small set of values has good temporal locality.
 
 The important systems-engineering lesson is that memory performance depends not only on how much data a program uses, but also on how it arranges and visits that data. Two algorithms with similar source-level complexity can have very different runtimes because one keeps its working data close to the CPU while the other repeatedly waits for memory.
-
-## Where this article fits
-
-The previous article explained how to use cycles, instructions, IPC, branch misses, and cache-related counters to investigate a slowdown. This article explains the memory behavior behind those measurements.
-
-The following articles will go deeper into memory ordering, atomic hardware, virtual memory, page tables, and memory allocation. Here, the focus is the cache hierarchy, locality, coherence, and the way data layout affects ordinary CPU code.
 
 ## Why caches exist
 
@@ -41,7 +35,7 @@ The exact cache arrangement depends on the processor. A typical multi-core machi
 
 The hierarchy is a compromise. Smaller storage can be built closer to the execution units and accessed more quickly. Larger storage holds more data but usually takes longer to search or reach. The CPU tries to make most accesses hit in a nearby level.
 
-## What a cache stores
+## What a cache actually stores
 
 A cache does not usually store one independent variable at a time. It transfers and tracks fixed-size blocks called cache lines. A cache line commonly contains several adjacent bytes, often 64 bytes on modern systems, but the exact size is architecture-dependent.
 
@@ -50,7 +44,7 @@ If a program loads one byte from an address, the CPU may bring the entire contai
 ```text
 Cache line:  [byte 0 ... byte 63]
 Address:                  ^
-                       requested byte
+                        requested byte
 ```
 
 This is the hardware reason sequential access is often efficient. The program requests one element, and the cache brings nearby elements along with it. It is also why touching one byte per large, widely separated region can waste much of every fetched line.
@@ -62,9 +56,9 @@ At a high level, a cache divides an address into parts. The cache uses some bits
 ```text
 Address bits:
     [              tag ][ set index ][ line offset ]
-                              |              |
-                              |              +-- byte inside the cache line
-                              +----------------- cache set to inspect
+                               |              |
+                               |              +-- byte inside the cache line
+                               +----------------- cache set to inspect
 ```
 
 The exact bit layout depends on the cache size, line size, number of sets, and associativity. A set-associative cache allows several lines with the same set index to exist in one set. If too many active addresses map to the same set, they can evict one another even when the total working data could theoretically fit in the cache. This behavior is called conflict pressure.
@@ -169,7 +163,7 @@ struct Particles {
 
 Now a loop that updates positions can read the position arrays without loading unrelated fields. This layout can improve locality and vectorization, but it may make operations that need an entire particle less convenient. The right choice depends on the dominant access patterns.
 
-The general rule is not “arrays are always better than structures.” The rule is: organize data around the operations that are actually hot. A layout that is excellent for one access pattern may be poor for another.
+The general rule is not arrays are always better than structures. The rule is: organize data around the operations that are actually hot. A layout that is excellent for one access pattern may be poor for another.
 
 ## Working sets and cache capacity
 
@@ -184,7 +178,7 @@ flowchart LR
     F --> G[Lower effective throughput]
 ```
 
-There is not one global “cache-friendly” size. L1, L2, and shared caches have different capacities. Other threads, the operating system, and unrelated processes also consume cache capacity. A data set that fits in L2 on an otherwise idle machine may not behave the same way under a real multi-threaded workload.
+There is not one global cache-friendly size. L1, L2, and shared caches have different capacities. Other threads, the operating system, and unrelated processes also consume cache capacity. A data set that fits in L2 on an otherwise idle machine may not behave the same way under a real multi-threaded workload.
 
 Blocking, also called tiling, is a technique for processing a large problem in smaller pieces so that a piece stays in cache while it is reused. Matrix multiplication is a classic example. Instead of operating on an entire large matrix at once, the algorithm works on smaller blocks.
 
@@ -359,60 +353,72 @@ Ask concrete questions:
 
 Then test one change at a time. Reorder fields, change the layout, block the operation, separate contended counters, or alter the access order only when the proposed change addresses an observed behavior.
 
-## Interview definitions
+## Write-back caching and the cost of a write
 
-### What is a CPU cache?
+How a store behaves in the cache matters as much as how a load behaves. In a write-back cache, the most common design, a store updates the line in the cache and marks it dirty, but the new value is not pushed to main memory immediately. It is written back only when the dirty line must be evicted to make room or when another core demands the current value. This is why a process can perform millions of stores per second without each one becoming a memory write, and it is also why a value written by one thread is not instantly visible to another until the line leaves the cache.
+
+A subtler cost is read-for-ownership. When a core wants to write a cache line it does not already own exclusively, it must first get the line in exclusive state, which means invalidating every other core's copy. That single act turns a cheap local store into a coherence transaction across the chip. This is the real machinery behind false sharing: every update to a shared line issues a read-for-ownership that bounces the line between cores, and the cost scales with the number of cores fighting over it.
+
+## The MESI coherence protocol
+
+Cache coherence is usually explained with four states that every cache line can occupy. Modified means the line is dirty and only this core has it. Exclusive means this core has the only copy and it matches memory, so it can be written without notifying anyone. Shared means other cores may also have readable copies, so a write needs permission first. Invalid means this core's copy is not usable.
+
+The practical consequence is that reads are cheap and shared. Many cores can hold a line in Shared state and read it freely without traffic. Writes are the expensive transition, because moving from Shared to Modified requires invalidating the other copies, which is the read-for-ownership transaction. A workload that only reads shared data can scale across cores, while a workload where every core writes its own field on a shared line thrashes the line through Modified and Invalid repeatedly. MESI is why the earlier advice to give each core its own counter is not a micro-optimization but a fundamental reduction in coherence traffic.
+
+## Streaming stores and cache replacement
+
+For bandwidth-bound bulk work such as copying or zeroing large buffers, ordinary stores are counterproductive: they pull each cache line into the cache, modify it, and then evict it, polluting the cache with data that will never be read again. Streaming, or non-temporal, store instructions write straight to memory without caching the line, keeping the working set of real hot data intact. memmove and memset implementations use these for large blocks, and languages expose them through intrinsics when you move data that will not be reused soon.
+
+Replacement also matters when the cache fills. Most caches approximate least-recently-used eviction, discarding the line least likely to be needed. When the working set exceeds capacity, lines are evicted before reuse, which is the eviction pressure described earlier. Inclusive caches keep a copy of every lower-level line in the shared cache, while exclusive caches do not, which changes how much useful capacity the levels appear to have. The systems-engineering point is that neither layout nor size alone decides hit rate; what matters is whether the data you touch repeatedly still fits in the level that serves it fastest.
+
+## Definitions
+
+### A CPU cache
 
 > A CPU cache is a small, fast memory layer that stores recently or nearby used data so the processor can avoid waiting for slower memory.
 
-### What is locality?
+### Locality
 
 > Locality is the tendency of a program to reuse recently accessed data or access data near an address it already used, allowing the cache to serve more loads as hits.
 
-### What is false sharing?
+### False sharing
 
 > False sharing occurs when independent variables used by different cores occupy the same cache line. Writes to one variable then cause unnecessary cache-line invalidation or transfer for the other core.
 
-## Interview follow-up questions
+## Beyond the definitions
 
-### What is the difference between temporal and spatial locality?
+### Temporal versus spatial locality
 
 > Temporal locality means recently used data is likely to be used again soon. Spatial locality means nearby addresses are likely to be used soon. Sequential array traversal mainly benefits from spatial locality, while repeatedly reusing a hot data set benefits from temporal locality.
 
-### Why can an array be faster than a linked list?
+### Why arrays often beat linked lists
 
 > Array elements are usually contiguous, so one cache-line fetch brings several useful neighboring elements and hardware prefetching can recognize the pattern. Linked-list nodes may be scattered, and each next address depends on the previous load, reducing locality and parallelism.
 
-### Does a cache miss always mean main-memory access?
+### Does a miss always reach memory
 
 > No. A miss at one cache level can still hit in a lower cache. The request reaches main memory only when the line is absent from the relevant cache hierarchy or must be supplied from there.
 
-### How would you investigate poor cache performance?
+### How to investigate poor cache behavior
 
 > I would measure the workload, inspect cache-related events and runtime, then examine the working set, data layout, access stride, pointer chasing, and cross-core sharing. I would change one access pattern or layout decision and measure again.
 
 ## Common misconceptions
 
-**“Caches make memory free.”** Caches reduce the average cost of access; they do not remove capacity limits, misses, coherence traffic, or memory bandwidth limits.
+**"Caches make memory free."** Caches reduce the average cost of access; they do not remove capacity limits, misses, coherence traffic, or memory bandwidth limits.
 
-**“A cache miss always costs the same amount.”** The cost depends on which level supplies the line, whether the request is on the critical path, whether it overlaps with other work, and what the rest of the memory system is doing.
+**"A cache miss always costs the same amount."** The cost depends on which level supplies the line, whether the request is on the critical path, whether it overlaps with other work, and what the rest of the memory system is doing.
 
-**“Using less memory always improves cache performance.”** Smaller data can help capacity and bandwidth, but compressing or packing data may add decoding work, reduce useful alignment, or create other costs.
+**"Using less memory always improves cache performance."** Smaller data can help capacity and bandwidth, but compressing or packing data may add decoding work, reduce useful alignment, or create other costs.
 
-**“False sharing means two threads access the same variable.”** That is ordinary sharing. False sharing means the variables are different but happen to occupy the same cache line.
+**"False sharing means two threads access the same variable."** That is ordinary sharing. False sharing means the variables are different but happen to occupy the same cache line.
 
-**“Manual prefetching is always an optimization.”** A bad prefetch can waste bandwidth and evict useful data. It should be introduced only after measurement shows a relevant miss pattern.
+**"Manual prefetching is always an optimization."** A bad prefetch can waste bandwidth and evict useful data. It should be introduced only after measurement shows a relevant miss pattern.
 
-**“Changing a structure to a structure-of-arrays layout is automatically better.”** It may improve a hot field-wise loop but make whole-object operations less convenient or increase complexity. Layout should follow the dominant workload.
+**"Changing a structure to a structure-of-arrays layout is automatically better."** It may improve a hot field-wise loop but make whole-object operations less convenient or increase complexity. Layout should follow the dominant workload.
 
 ## Summary
 
 The CPU moves data in cache lines, not in isolated source-level variables. A cache hit is fast because the required line is already nearby; a miss requires data to travel through a slower part of the hierarchy. Programs run well when they reuse data and access nearby addresses in patterns the hardware can predict.
 
 The important concepts are capacity, locality, latency, bandwidth, and coherence. A single thread can suffer from poor locality, for example scanning a matrix in the wrong order for how it is stored, while multiple threads can suffer from cache-line movement and false sharing when they update nearby counters. The right fix depends on the actual access pattern, so look at the hot data layout and measure the workload instead of applying cache advice mechanically.
-
-## If you want to build this later
-
-Build a **cache locality laboratory**. Implement benchmarks for sequential access, different strides, row-major versus column-major matrix traversal, array-of-structures versus structure-of-arrays layouts, and two counters that either share or avoid a cache line.
-
-For every benchmark, record input size, runtime, CPU cycles, instructions, IPC, and cache-related counters when available. Then write down where the working set fits, which cache lines are reused, whether the workload is latency- or bandwidth-sensitive, and whether your measurements support that explanation.
