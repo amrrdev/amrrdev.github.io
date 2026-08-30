@@ -12,13 +12,13 @@ series_order: 3
 
 ## What we mean by a resource
 
-This is the third chapter in the Systems Programming Foundations arc. The first chapter argued that systems programming is different from application programming because it cannot pretend the machine away. A program running on real hardware lives inside limits it did not choose, and it shares those limits with other programs, with the operating system, and often with other machines across a network. The second chapter named the four fundamental families of resource that every system must account for: CPU time, memory, storage, and network bandwidth. This chapter is where those abstract "resources" turn into concrete rules. Once you accept that a resource is finite and shared, two questions stop being optional.
+This is the third chapter in the Systems Programming Foundations arc. The first chapter said systems programming is different from application programming because it cannot pretend the machine does not exist. A program running on real hardware lives inside limits it did not choose. It shares those limits with other programs, with the operating system, and often with other machines over a network. The second chapter named the four basic kinds of resource every system must track: CPU time, memory, storage, and network bandwidth. This chapter turns those abstract "resources" into concrete rules. Once you accept that a resource is finite and shared, two questions become unavoidable.
 
-A resource, in the sense used here, is anything your program asks the system for that is finite and that the system must track on your behalf. Some resources are handed out by the operating system: a block of address space, an open file, a socket, a file descriptor, a thread. Some are created by libraries you link against: a connection pool, a work queue, a buffer arena, a lock. Some live entirely outside your process and are merely represented inside it: a row lock in a database, a lease in a coordination service, a message already placed on a broker. What they share is that they are not infinite, they are not free, and somebody has to decide when they are created, when they are used, and when they are gone.
+A resource, as we use the word here, is anything your program asks the system for that is finite and that the system must track for you. The operating system hands out some resources: a block of address space, an open file, a socket, a file descriptor, a thread. Libraries you link against create others: a connection pool, a work queue, a buffer arena, a lock. Some live entirely outside your process and are only represented inside it: a row lock in a database, a lease in a coordination service, a message already placed on a broker. What they share is that they are not infinite, they are not free, and someone has to decide when they are created, when they are used, and when they go away.
 
-Ownership is the word we use for accountability. It is tempting to read "ownership" as "who has a pointer to this object," but that reading causes more production incidents than almost any other confusion in systems work. Owning a resource means being the component that is responsible when the resource is created incorrectly, used incorrectly, exhausted, or left behind. In application programming you can often get away with ignoring this, because a framework underneath you has already taken on the accountability. In systems programming you usually are that framework, and there is no layer below you quietly cleaning up.
+Ownership is the word we use for accountability. It is tempting to read "ownership" as "who holds a pointer to this object," but that reading causes more production incidents than almost any other confusion in systems work. Owning a resource means being the component that is responsible when the resource is created wrong, used wrong, exhausted, or left behind. In application programming you can often ignore this, because a framework underneath you has already taken on the accountability. In systems programming you usually are that framework, and there is no layer below you quietly cleaning up.
 
-This distinction is why the topic earns a full chapter rather than a paragraph. A garbage collector can return unused memory to the heap, but it will not close the socket you forgot, release the lock you held, or tell the remote database that the connection you abandoned is now dead. The operating system will reclaim your process memory when the process dies, but it will not roll back the half-written file, undo the distributed lock, or un-send the message you already pushed onto a queue. Ownership and limits are the tools that make those gaps survivable, and the rest of this chapter works through them in detail.
+This is why the topic gets a full chapter rather than a paragraph. A garbage collector can return unused memory to the heap, but it will not close the socket you forgot, release the lock you held, or tell the remote database that the connection you abandoned is now dead. The operating system will reclaim your process memory when the process dies, but it will not roll back the half-written file, undo the distributed lock, or un-send the message you already pushed onto a queue. Ownership and limits are the tools that make those gaps survivable, and the rest of this chapter works through them in detail.
 
 ## The two questions every resource raises
 
@@ -30,7 +30,7 @@ Resource limits answer the related question:
 
 > How much of this resource may be used, and what happens when the limit is reached?
 
-Those two questions come up for every kind of resource you will meet: memory, files, file descriptors, sockets, database connections, threads, CPU time, storage, queues, and more. When ownership is muddy, cleanup tends to be unreliable. When limits are missing, one piece of work can eat everything and take the whole system down with it. The nasty part is that neither problem usually shows up early. A system can drift along for months with unclear ownership or no limits, and then fail on the day traffic spikes, or a clock rolls over, or someone ships an unrelated change that finally tips it over.
+Those two questions come up for every kind of resource you will meet: memory, files, file descriptors, sockets, database connections, threads, CPU time, storage, queues, and more. When ownership is unclear, cleanup tends to be unreliable. When limits are missing, one piece of work can eat everything and take the whole system down with it. The bad part is that neither problem usually shows up early. A system can drift along for months with unclear ownership or no limits, and then fail on the day traffic spikes, or a clock rolls over, or someone ships an unrelated change that finally tips it over.
 
 Here is a concrete picture. A single HTTP request handled by a normal backend service touches a pile of resources. It uses CPU time on some thread. It allocates memory on the heap. It opens or borrows a socket file descriptor to read the request and write the response. It may borrow a database connection from a pool. It may push a job onto a work queue. Every one of those is a resource with an owner and a limit. The request handler does not own any of them for its whole life. It borrows most, uses them for a moment, and is expected to hand them back. The service as a whole owns the pool, the listener socket, and the worker threads. If even one of those handoffs is left undocumented, a later change will eventually close something it should not have, or leak something it should have closed.
 
@@ -38,10 +38,10 @@ Good systems do four things on purpose: they make ownership visible, they give e
 
 What that looks like in the field:
 
-- Unclear ownership breeds leaks and double-frees. Capacity bleeds away and nobody notices until it is gone.
-- No clear lifetime produces use-after-close and stale handles. The system fails as corruption or a crash somewhere far from the original mistake.
+- Unclear ownership causes leaks and double-frees. Capacity drains away and nobody notices until it is gone.
+- No clear lifetime produces use-after-close and stale handles. The system fails through corruption or a crash somewhere far from the original mistake.
 - Missing limits let one path eat everything. A single bad request, one noisy tenant, or one retry storm can take down work that was otherwise healthy.
-- No explicit exhaustion behavior means the system falls into whatever accidental behavior the code happens to produce, which is almost never what anyone would have picked on purpose.
+- No explicit exhaustion behavior means the system does whatever the code happens to do by accident, which is almost never what anyone would have chosen on purpose.
 
 The rest of this chapter walks through those four disciplines one at a time, with diagrams, code, and stories of how they go wrong.
 
@@ -156,7 +156,7 @@ If a file is needed for one operation, keeping it open for the whole process was
 
 On the other hand, building and tearing down an expensive resource for every tiny operation can be wasteful, and swinging too far the other way has its own costs. A connection pool or a reusable buffer cuts setup cost, but it introduces shared ownership and a limit you have to manage, trading one kind of complexity for another. Opening a fresh TCP connection to the database for every query might cost a few milliseconds of handshake per query, which is fine at low volume and disastrous at high volume, which is exactly why pools exist. But the pool only helps if its size is chosen on purpose and every borrower returns the connection promptly.
 
-The right lifetime depends on the cost of creating it, the cost of keeping it, whether it is safe to share, and how much concurrency you expect, and there is rarely one correct answer outside those specifics. A temporary file used during a single upload should be scoped to that upload and deleted the moment the upload ends. A thread created to handle one request might be pooled instead, because thread creation and teardown are comparatively expensive and the work is frequent. A large in-memory cache may be deliberately long-lived precisely because rebuilding it is the expensive part, but then its eviction and size bounds become the ownership question that matters most.
+The right lifetime depends on the cost of creating it, the cost of keeping it, whether it is safe to share, and how much concurrency you expect. Outside those specifics, there is rarely one correct answer. A temporary file used during a single upload should be scoped to that upload and deleted the moment the upload ends. A thread created to handle one request might be pooled instead, because thread creation and teardown are expensive and the work is frequent. A large in-memory cache may be deliberately long-lived because rebuilding it is the expensive part. But then its eviction and size bounds become the ownership question that matters most.
 
 ```mermaid
 flowchart LR
@@ -188,7 +188,7 @@ defer file.Close()
 
 The point is not the keyword. The point is that the cleanup rule is set right next to the line that acquired the resource, so a reader never has to comb through the rest of the function to find out whether the file gets closed. If later code returns early on an error, the cleanup still runs, which is exactly the case a cleanup rule written far from the acquisition is most likely to miss.
 
-This pattern has limits too, and it is worth being honest about where it stops being enough. If `Close` can fail in a way that matters, the program has to handle that error instead of throwing it away; a `defer file.Close()` that ignores the returned error can hide a failed flush of buffered writes. If a resource is borrowed rather than owned, the borrower should not close it no matter how convenient `defer` makes that, because closing a borrowed resource pulls it out of the owner's pool. If cleanup must happen before a transaction commits, merely scheduling it at function return may not be enough, because the order of cleanup relative to other side effects can matter as much as the cleanup itself. A `defer` that closes a file after the function returns will run after the transaction commit the function performed, which may be the wrong order if the file had to be durable before the transaction was acknowledged.
+This pattern has limits too, and it is worth being honest about where it stops being enough. If `Close` can fail in a way that matters, the program has to handle that error instead of throwing it away. A `defer file.Close()` that ignores the returned error can hide a failed flush of buffered writes. If a resource is borrowed rather than owned, the borrower should not close it no matter how convenient `defer` makes that, because closing a borrowed resource pulls it out of the owner's pool. If cleanup must happen before a transaction commits, merely scheduling it at function return may not be enough. The order of cleanup relative to other side effects can matter as much as the cleanup itself. A `defer` that closes a file after the function returns will run after the transaction commit the function performed. That may be the wrong order if the file had to be durable before the transaction was acknowledged.
 
 ## When setup fails partway
 
@@ -208,13 +208,13 @@ If authentication fails after a socket and a connection were already created, th
 
 This pattern shows up across many resource types. A function that creates a temporary file and then fails to open it for writing still has to delete that temporary file. A routine that allocates a buffer, then maps it, then takes a lock, and fails at the lock step has to release the mapping and the buffer, not just the lock. A transaction that begins, writes a record, and then cannot commit has to roll back, not leave the record half-written. Every multi-step setup has a triangular cleanup duty: each step that succeeded before the failure has to be undone in reverse order.
 
-Every acquisition step deserves a matching cleanup path. This matters most for files, sockets, temporary directories, memory mappings, locks, and transactions, all of which tend to be built up in stages where any single stage can be the one that fails. The discipline that prevents these leaks is easy to describe and hard to keep up: treat cleanup as part of the same control flow as acquisition, not an afterthought bolted onto the success path.
+Every acquisition step deserves a matching cleanup path. This matters most for files, sockets, temporary directories, memory mappings, locks, and transactions. All of these tend to be built up in stages, and any single stage can be the one that fails. The discipline that prevents these leaks is easy to describe and hard to keep up. Treat cleanup as part of the same control flow as acquisition, not an afterthought bolted onto the success path.
 
 ## What survives a process crash
 
 The operating system reclaims some resources when a process exits. It closes the process's file descriptors, releases its address space, and removes many kernel objects tied to the process, all without the process doing anything.
 
-That does not make process crashes harmless, and it is a mistake to treat the OS cleanup as a stand-in for thinking about failure. A crash can leave persistent data half-written, a distributed lock held in another system, a transaction uncertain, or a message already sent but not acknowledged. Resources owned outside the process can outlive it, sometimes indefinitely, unless something else is specifically built to notice and reclaim them.
+That does not make process crashes harmless, and it is a mistake to treat the OS cleanup as a replacement for thinking about failure. A crash can leave persistent data half-written, a distributed lock held in another system, a transaction uncertain, or a message already sent but not acknowledged. Resources owned outside the process can outlive it, sometimes forever, unless something else is specifically built to notice and reclaim them.
 
 The recovery behavior depends on the resource:
 
@@ -227,7 +227,7 @@ The recovery behavior depends on the resource:
 
 Here is a concrete version of the message case. A service reads a job from a queue, starts processing it, and sends a side-effecting request to a downstream system. Before it can acknowledge the job back to the queue, the process crashes. The queue, seeing no acknowledgement, may redeliver the job after a timeout. The downstream system now gets the same request twice. If the operation is not idempotent, the duplicate does real damage. The local resources were reclaimed by the OS, but the external effect was not, and that gap is the actual bug.
 
-That is why "the operating system cleans it up" is only a partial answer, and treating it as a complete one surprises people during incident review. It covers some local resources, not every effect the process created, and the gap between those two groups is exactly where distributed-systems failures like duplicate messages, stuck locks, and inconsistent state tend to come from.
+That is why "the operating system cleans it up" is only a partial answer. Treating it as a complete one surprises people during incident review. It covers some local resources, not every effect the process created. The gap between those two groups is exactly where distributed-systems failures like duplicate messages, stuck locks, and inconsistent state tend to come from.
 
 ## Why resources need limits
 
@@ -257,7 +257,7 @@ A soft limit is a target, a warning threshold, or a preferred maximum. The syste
 
 Soft limits are good for early warning. A service might alert when memory hits 70 percent of its limit, leaving time to investigate before the operating system kills it outright with no graceful shutdown. A queue might start shedding low-priority work before it is completely full, buying room before the hard limit is ever reached.
 
-The exact meaning of "soft" depends on the system. Some operating systems expose soft and hard resource limits as a literal, named pair of settings. On Linux, `RLIMIT_FSIZE` can have a soft limit that makes a process receive a signal when it tries to write past a certain file size, while the hard limit is the absolute ceiling only privileged processes may raise. In application design the terms are often used more loosely to mean a warning threshold versus an enforced boundary, and the mechanism varies from system to system even though the underlying idea holds. The practical lesson is to have both: a tripwire that wakes someone up early, and a wall that stops the damage if the tripwire was ignored.
+The exact meaning of "soft" depends on the system. Some operating systems expose soft and hard resource limits as a literal, named pair of settings. On Linux, `RLIMIT_FSIZE` can have a soft limit that makes a process receive a signal when it tries to write past a certain file size, while the hard limit is the absolute ceiling that only privileged processes may raise. In application design the terms are often used more loosely to mean a warning threshold versus an enforced boundary. The mechanism varies from system to system, even though the underlying idea holds. The practical lesson is to have both: a tripwire that wakes someone up early, and a wall that stops the damage if the tripwire was ignored.
 
 ## Choosing a policy for exhaustion
 
@@ -325,7 +325,7 @@ flowchart LR
     Pool --> Wait[Wait or fail when all are busy]
 ```
 
-Making the pool bigger is not always an improvement, even though it is often the first thing anyone tries. It can cut waiting on the application side while increasing database contention, memory use, lock contention, and network load, effectively moving the queueing from a place you can see (the pool) to a place that is harder to see and often more expensive to be stuck in (the database itself). If the database can only usefully process five concurrent queries, a pool of fifty mostly produces fifty queries fighting for the same five units of useful work, plus the overhead of context switching and lock contention between them. The pool limit is part of the design of the whole system, not just an application setting you tune in isolation.
+Making the pool bigger is not always an improvement, even though it is often the first thing anyone tries. It can cut waiting on the application side while increasing database contention, memory use, lock contention, and network load. Effectively, it moves the queueing from a place you can see (the pool) to a place that is harder to see and often more expensive to be stuck in (the database itself). If the database can only usefully process five concurrent queries, a pool of fifty mostly produces fifty queries fighting for the same five units of useful work, plus the overhead of context switching and lock contention between them. The pool limit is part of the design of the whole system, not just an application setting you tune in isolation.
 
 This is also where the pool's ownership model and its limit meet. The pool owns the connections, so a request that borrows one has to return it on every path, success or failure. The pool's limit is the boundary that decides what happens when all connections are busy, and that decision should be the deliberate overload policy from the previous section: wait briefly with a timeout, fail the request, or shed it, rather than letting threads block forever.
 
@@ -343,7 +343,7 @@ This makes file descriptors a useful example of ownership, worth walking through
 
 On Linux the default per-process descriptor limit is typically 1024, configurable through `ulimit -n` or systemd unit settings. That number is the hard ceiling on how many of these kernel objects one process can hold at once, no matter how much memory or disk the machine has free.
 
-If the process forgets step 4, descriptors pile up, slowly and silently, one at a time, with no single moment where anything visibly breaks. Eventually a new open or socket call fails even though the machine may still have memory and storage to spare, which is exactly the kind of failure that confuses whoever gets paged first, because every other resource on the dashboard still looks fine.
+If the process forgets step 4, descriptors pile up, slowly and silently, one at a time, with no single moment where anything visibly breaks. Eventually a new open or socket call fails even though the machine may still have memory and storage to spare. That is exactly the kind of failure that confuses whoever gets paged first, because every other resource on the dashboard still looks fine.
 
 The failure can show up far from the leak. A service might report that it cannot accept new network connections, while the real cause is that some unrelated part of the process opened files and never closed them. Two features that seem unrelated share the same finite pool of descriptors, and one quietly starves the other. A log-rotation routine that opens a file to write a debug line and forgets to close it on the error path can, over days, eat enough descriptors that the request-handling path can no longer accept sockets, even though the logging code and the network code have nothing to do with each other except sharing the descriptor table.
 
@@ -381,7 +381,7 @@ Fairness costs something. Tracking usage and enforcing separate limits eats memo
 
 A limit in one component can conflict with a limit in another, and this is one of the subtler sources of production incidents, because each piece can look completely correct on its own.
 
-Suppose a service runs 20 worker threads but its database pool has only 5 connections. At most 5 workers can do database work at once; the other 15 may wait. That may be fine if the database can only handle 5 concurrent operations, or it may mean the service is holding workers idle while they wait for connections, wasting thread capacity that could have been doing something useful. The thread limit and the connection limit interact, and the larger of the two does not help if the smaller is the real bottleneck.
+Suppose a service runs 20 worker threads but its database pool has only 5 connections. At most 5 workers can do database work at once. The other 15 may wait. That may be fine if the database can only handle 5 concurrent operations. Or it may mean the service is holding workers idle while they wait for connections, wasting thread capacity that could have been doing something useful. The thread limit and the connection limit interact, and the larger of the two does not help if the smaller is the real bottleneck.
 
 Now suppose the database allows 100 connections but the service runs in 50 process replicas, each with a pool of 10. The theoretical maximum is 500 connections, which exceeds the database limit. Each replica may look safe in isolation while the deployment is unsafe as a whole, and no single engineer looking at one replica's config would necessarily catch it.
 
@@ -391,7 +391,7 @@ Per-process pool limit
     = possible database connections
 ```
 
-Limits have to be reasoned about at the scope where they apply. A local limit does not automatically protect a shared global resource, and the arithmetic above is exactly the kind of multiplication you have to do explicitly, because it will never announce itself. The database sees 500 attempted connections, not 10, and its own limit of 100 is the one that actually bites. The fix is not to raise the database limit to 500, which would only let 50 replicas each hold 10 idle connections and starve the database of CPU for query work. The fix is to compute the global total and set each replica's pool so that replicas times pool size stays under the database's safe capacity, leaving room for other consumers of that same database.
+Limits have to be reasoned about at the scope where they apply. A local limit does not automatically protect a shared global resource. The arithmetic above is exactly the kind of multiplication you have to do explicitly, because it will never announce itself. The database sees 500 attempted connections, not 10, and its own limit of 100 is the one that actually bites. The fix is not to raise the database limit to 500, because that would only let 50 replicas each hold 10 idle connections and starve the database of CPU for query work. The fix is to compute the global total and set each replica's pool so that replicas times pool size stays under the database's safe capacity, leaving room for other consumers of that same database.
 
 ## Observing resource usage
 
@@ -409,7 +409,7 @@ A limit is only useful if the team can tell when it is being approached or reach
 - Resource creation rate
 - Resource release rate
 
-For a connection pool, measuring only the number of open connections is not enough. The team should also measure how long requests wait for a connection, how often acquisition times out, how long connections are held, and whether connections are returned successfully, because any one of those can reveal a problem the raw open-connection count would miss entirely. An open-connection count of 5 out of a pool of 5 looks identical whether those connections are held for 5 milliseconds or 5 seconds. Only the wait-time and hold-time metrics separate a healthy pool from one that is saturated and barely keeping up.
+For a connection pool, measuring only the number of open connections is not enough. The team should also measure how long requests wait for a connection, how often acquisition times out, how long connections are held, and whether connections are returned successfully. Any one of those can reveal a problem the raw open-connection count would miss entirely. An open-connection count of 5 out of a pool of 5 looks identical whether those connections are held for 5 milliseconds or 5 seconds. Only the wait-time and hold-time metrics separate a healthy pool from one that is saturated and barely keeping up.
 
 For memory, total usage is not enough. Allocation rate, garbage-collection activity, page faults, cache pressure, and process restarts can explain why usage is changing, turning a flat number into an actual story about what the system is doing. A service sitting at 60 percent of its memory limit looks fine until you notice the allocation rate climbing and the GC pause time growing, which says the limit will be hit soon even though the current number is comfortable.
 
@@ -421,13 +421,13 @@ and:
 
 > Which owner or workload is consuming it?
 
-The second question is usually the harder one, and it is normally the one that matters most once an incident is underway, because knowing a resource is near its limit is far less useful than knowing who to go talk to about it. A dashboard that says "database connection pool 95 percent full" tells you something is wrong. A dashboard that says "tenant X holds 80 percent of the pool" tells you who is causing it and what to do about it.
+The second question is usually the harder one, and it is normally the one that matters most once an incident is underway. Knowing a resource is near its limit is far less useful than knowing who to go talk to about it. A dashboard that says "database connection pool 95 percent full" tells you something is wrong. A dashboard that says "tenant X holds 80 percent of the pool" tells you who is causing it and what to do about it.
 
 ## A leak that became an outage
 
 Imagine a service that starts returning errors during a traffic increase. The first error says "too many open files." The team raises the process file-descriptor limit and ships the change. The error disappears for a few hours, then comes back at a larger number.
 
-The limit was real, but raising it did not fix the cause. The service was opening a new response body for each request and not closing it on an error path. The descriptors accumulated slowly and invisibly, request after request, only on the specific paths where errors occurred. Eventually the process could not accept new sockets or open required files, and the same symptom returned, just later and at a higher number, because the underlying leak was never actually addressed.
+The limit was real, but raising it did not fix the cause. The service was opening a new response body for each request and not closing it on an error path. The descriptors accumulated slowly and invisibly, request after request, only on the specific paths where errors occurred. Eventually the process could not accept new sockets or open required files, and the same symptom returned, just later and at a higher number. The underlying leak was never actually addressed.
 
 The real fix has several parts:
 
@@ -437,7 +437,7 @@ The real fix has several parts:
 4. Keep the limit high enough for legitimate load but low enough to contain damage. Too low and normal traffic is rejected; too high and a leak runs for weeks before anyone notices.
 5. Investigate why the leak was not visible earlier. The answer is usually that nobody was measuring descriptor count, which is an observability gap, not just a code bug.
 
-The limit is still valuable. It prevents unlimited growth and creates a detectable failure, turning what could have been a silent, slow-motion collapse into a specific, loud, investigable error. But a limit should be a safety boundary, not a substitute for correct ownership, and treating it as the latter is exactly what let this incident recur. Raising the limit from 1024 to 4096 only delayed the same outage by a factor of four. It did not change the fact that the service was leaking one descriptor per failed request.
+The limit is still valuable. It prevents unlimited growth and creates a detectable failure, turning what could have been a silent, slow-motion collapse into a specific, loud, investigable error. But a limit should be a safety boundary, not a substitute for correct ownership. Treating it as the latter is exactly what let this incident recur. Raising the limit from 1024 to 4096 only delayed the same outage by a factor of four. It did not change the fact that the service was leaking one descriptor per failed request.
 
 ## A checklist for unfamiliar resources
 

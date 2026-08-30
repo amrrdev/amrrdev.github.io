@@ -10,13 +10,13 @@ stage_order: 6
 series_order: 4
 ---
 
-The previous chapter closed by pointing at `mmap` as the place where many page faults are born. This chapter opens that mechanism. It is the fourth article of Stage 6.
+The previous chapter showed that `mmap` is where many page faults start. This chapter explains how that mechanism works. This is the fourth article in Stage 6.
 
-`mmap` is the system call that maps a region of memory to something else: a file, a device, or nothing at all. After it returns, the program reads and writes bytes through ordinary pointers, and the kernel turns those accesses into file I/O, copy-on-write, or shared memory behind the scenes. It is the bridge between the address space you have been reading about and the data that actually lives on disk or in another process.
+`mmap` is a system call. It maps a region of memory to something else: a file, a device, or nothing. After it returns, the program reads and writes bytes through normal pointers. The kernel turns those reads and writes into file I/O, copy-on-write, or shared memory. It connects the address space you have read about to data that lives on disk or in another process.
 
-## What mmap does at a high level
+## What mmap does
 
-A normal file read copies bytes from the kernel's page cache into a buffer you allocated. `mmap` instead asks the kernel to project the file directly into your virtual address space. After that, reading the file is just dereferencing a pointer, and the page faults described in the last chapter are what pull the bytes in.
+A normal file read copies bytes from the kernel's page cache into a buffer you made. With `mmap`, the program asks the kernel to place the file directly into your virtual address space. After that, reading the file is just using a pointer. The page faults from the last chapter are what bring the bytes in.
 
 ```mermaid
 flowchart LR
@@ -25,23 +25,23 @@ flowchart LR
     C -->|mapped, no copy| UP[User pointer - mmap path]
 ```
 
-The difference is the copy. With `read` and a buffer, the data moves from the cache into your memory. With `mmap`, your pointer sits on top of the cache, so there is no second copy. That is the heart of why `mmap` is described as zero-copy for the read side, and it is also why the faults you saw earlier show up: the first touch of a mapped page pulls it from the file.
+The difference is the copy. With `read` and a buffer, the data moves from the cache into your memory. With `mmap`, your pointer sits on the cache, so there is no second copy. This is why `mmap` is called zero-copy on the read side. It is also why the faults you saw earlier appear. The first time you touch a mapped page, the kernel pulls it from the file.
 
-## Anonymous versus file-backed mappings
+## Anonymous and file-backed mappings
 
-An anonymous mapping is not attached to any file. It behaves like a private region of memory that several processes can share if created for that purpose, or that one process uses as a large allocation. It is backed by RAM (and possibly swap) and starts zeroed.
+An anonymous mapping is not attached to any file. It acts like a region of memory that several processes can share, or that one process can use as a large allocation. It is backed by RAM (and maybe swap) and starts as zeros.
 
-A file-backed mapping attaches a file to the region. Reading a byte reads the file; writing, depending on flags, either changes the file or a private copy. The file is the source of truth, and the page cache is the middle layer that holds the bytes while they are mapped.
+A file-backed mapping attaches a file to the region. Reading a byte reads the file. Writing, depending on the flags, changes the file or a private copy. The file is the source of truth. The page cache is the middle layer that holds the bytes while they are mapped.
 
-The two kinds share the same machinery. Both are ranges in the virtual address space described by a `vm_area_struct`, both translate through page tables, and both can fault. They differ in what happens when the kernel needs to fill or reclaim a page.
+Both kinds use the same machinery. Each is a range in the virtual address space. A `vm_area_struct` (a kernel record that describes one mapped region) tracks it. Both translate through page tables and both can fault. They differ in what the kernel does when it needs to fill or reclaim a page.
 
-## MAP_SHARED versus MAP_PRIVATE
+## MAP_SHARED and MAP_PRIVATE
 
-These two flags decide what a write means, and they are the most important choice you make with `mmap`.
+These two flags decide what a write does. They are the most important choice you make with `mmap`.
 
-A `MAP_SHARED` mapping means writes are visible to other processes that map the same file, and they are eventually written back to the file itself. This is how memory-mapped shared state works: two processes mapping the same file see each other's changes.
+A `MAP_SHARED` mapping means your writes are visible to other processes that map the same file. The writes are eventually written back to the file. This is how memory-mapped shared state works. Two processes that map the same file see each other's changes.
 
-A `MAP_PRIVATE` mapping means writes are not shared and are not written to the file. The kernel implements this with copy-on-write, the same mechanism from the previous chapter. The first write to a private page forks a copy, and the writer sees its own version while others keep the original.
+A `MAP_PRIVATE` mapping means writes are not shared and are not written to the file. The kernel does this with copy-on-write (the mechanism from the previous chapter). The first write to a private page makes a copy. The writer sees its own version while others keep the original.
 
 ```mermaid
 flowchart TD
@@ -50,7 +50,7 @@ flowchart TD
     K -->|private| P[Copy-on-write, private only]
 ```
 
-The trap is assuming one when you got the other. Mapping a file privately and then writing to it changes nothing on disk, which surprises people who expected their edits to persist. Mapping it shared and writing changes the file under every other reader, which surprises people who expected privacy.
+The trap is thinking you got one when you got the other. If you map a file privately and write to it, nothing on disk changes. People who expected their edits to persist are surprised. If you map it shared and write, you change the file under every other reader. People who expected privacy are surprised.
 
 ## The flags worth knowing
 
@@ -68,11 +68,11 @@ Beyond the sharing mode, a few flags and protections decide behavior.
 | MAP_POPULATE | Fault all pages in at mmap time instead of on access |
 | MAP_NORESERVE | Do not reserve swap space for the mapping |
 
-`MAP_FIXED` is dangerous because it can overwrite an existing mapping at that address, which can clobber your program's own code or libraries. `MAP_POPULATE` trades a slow mmap call for faster later access, which is useful when you would rather pay the fault cost up front than suffer it during a request. `MAP_NORESERVE` is a memory-overcommitting choice that matters when swap reservation matters.
+`MAP_FIXED` is dangerous. It can overwrite an existing mapping at that address and clobber your program's own code or libraries. `MAP_POPULATE` trades a slow mmap call for faster later access. Use it when you would rather pay the fault cost up front than suffer it during a request. `MAP_NORESERVE` is a memory-overcommitting choice. It matters when swap reservation matters.
 
-## How mmap meets the page cache
+## How mmap uses the page cache
 
-For a file-backed mapping, the kernel does not keep a separate copy of the file for your process. It uses the same page cache that `read` and `write` use. If another process reads the file with `read`, or maps it, they share those cached pages. This is why mapping a large file that is also read elsewhere does not double the memory: the bytes live once in the cache.
+For a file-backed mapping, the kernel does not keep a separate copy of the file for your process. It uses the same page cache that `read` and `write` use. If another process reads the file or maps it, they share those cached pages. This is why mapping a large file that is also read elsewhere does not double the memory. The bytes live once in the cache.
 
 ```mermaid
 flowchart LR
@@ -82,45 +82,45 @@ flowchart LR
     Cache --> Disk[File on disk]
 ```
 
-Writes to a shared mapping go through the cache too. They mark pages dirty, and the kernel writes them back to disk later, just as it would for a `write` syscall. The timing of that writeback is up to the kernel unless you call `msync` to force it, which is one reason a crash can lose recently written mapped data.
+Writes to a shared mapping also go through the cache. They mark pages dirty. The kernel writes them back to disk later, just as it would for a `write` syscall. The timing of that writeback is up to the kernel unless you call `msync` to force it. This is one reason a crash can lose recently written mapped data.
 
-This also explains the major-fault story from the last chapter. A mapped page that is not in the cache faults in from disk; a mapped page already in the cache faults in as a minor fault. The page cache is the bridge that makes both possible, and it is shared across every way the file is accessed.
+This also explains the major-fault story from the last chapter. A mapped page that is not in the cache faults in from disk. A mapped page already in the cache faults in as a minor fault. The page cache makes both possible, and it is shared across every way the file is accessed.
 
 ## mmap as zero-copy reading
 
-The classic use is serving or scanning a large file without copying it through a user buffer. Instead of `open`, `read` into a buffer, process, repeat, you `mmap` the file and walk the pointer. There is no per-call copy from kernel to user, and the kernel only faults in the pages you actually touch.
+The classic use is serving or scanning a large file without copying it through a user buffer. Instead of `open`, `read` into a buffer, process, repeat, you `mmap` the file and walk the pointer. There is no per-call copy from kernel to user. The kernel only faults in the pages you actually touch.
 
-This matters for large file handling. A tool that scans a multi-gigabyte file can map it and read sequentially, letting the kernel page it in a window at a time, rather than managing a buffer loop by hand. For sending a file over a socket, `mmap` plus writing the pointer, or better, `sendfile`, avoids copying the bytes through user space at all.
+This matters for large file handling. A tool that scans a multi-gigabyte file can map it and read sequentially. The kernel pages it in one window at a time. You do not manage a buffer loop by hand. For sending a file over a socket, `mmap` plus writing the pointer works. Better still, `sendfile` avoids copying the bytes through user space at all.
 
-The catch is that `mmap` works in page-sized units. A small file still consumes at least one page of address space, and a file smaller than a page wastes the rest of that page. For many tiny files, the overhead of a mapping per file outweighs the copy you avoided, and ordinary `read` is simpler and faster.
+The catch is that `mmap` works in page-sized units. A small file still uses at least one page of address space. A file smaller than a page wastes the rest of that page. For many tiny files, the cost of one mapping per file is more than the copy you avoided. Ordinary `read` is simpler and faster.
 
 ## Prefaulting and pinning with madvise and mlock
 
-Because the first touch faults, a workload that needs predictable latency can ask the kernel to prepare pages ahead of time. `madvise(MADV_WILLNEED)` tells the kernel to prefetch a range, turning later faults into hits. `madvise(MADV_DONTNEED)` tells it a range will not be used soon, releasing the pages. `madvise(MADV_HUGEPAGE)` asks for huge pages in that range, tying back to the translation chapter.
+The first touch faults, so a workload that needs predictable latency can ask the kernel to prepare pages ahead of time. `madvise(MADV_WILLNEED)` tells the kernel to prefetch a range. Later faults become hits. `madvise(MADV_DONTNEED)` tells the kernel a range will not be used soon, so it releases the pages. `madvise(MADV_HUGEPAGE)` asks for huge pages in that range. This links back to the translation chapter.
 
-`mlock` goes further: it pins pages in RAM so they cannot be swapped out and will not fault. This removes both the swap risk and the fault latency, at the cost of tying up physical memory and, on most systems, requiring privilege. Pinning a large region under memory pressure makes the situation worse for everyone else, so it is used sparingly for small, critical areas such as crypto keys or a latency-critical hot loop.
+`mlock` goes further. It pins pages in RAM so they cannot be swapped out and will not fault. This removes both the swap risk and the fault latency. The cost is that it ties up physical memory and, on most systems, needs privilege. Pinning a large region under memory pressure makes things worse for everyone else. Use it sparingly for small, critical areas such as crypto keys or a latency-critical hot loop.
 
 ## Use cases that earn their place
 
-Shared memory between processes is the clearest win. Two processes that map the same file with `MAP_SHARED`, or that use an anonymous shared mapping, exchange data by writing memory, with no syscalls on the hot path. This is how many high-performance IPC designs avoid copying.
+Shared memory between processes is the clearest win. Two processes that map the same file with `MAP_SHARED`, or that use an anonymous shared mapping, exchange data by writing memory. No syscalls run on the hot path. This is how many high-performance IPC designs avoid copying.
 
-Read-only shared datasets are another. A service with several worker processes can map a large read-only index file once and let every worker share the cached pages. The file is loaded into the cache a single time, and each worker's resident memory stays small because they point at the same frames.
+Read-only shared datasets are another case. A service with several worker processes can map a large read-only index file once. Every worker shares the cached pages. The file is loaded into the cache a single time. Each worker's resident memory stays small because they point at the same frames.
 
-Large file scanning benefits from avoiding the copy and the buffer management. And hardware access, by mapping a device register range, lets a driver touch hardware through pointers, though that is specialized and outside the usual backend path.
+Large file scanning benefits from avoiding the copy and the buffer management. Hardware access also benefits. By mapping a device register range, a driver can touch hardware through pointers. This is specialized and outside the usual backend path.
 
 ## Risks and pitfalls
 
-The most famous trap is `SIGBUS`. If you map a file and then the file is truncated or the mapped region falls past the end of the file, touching that page raises a bus error rather than a polite fault. This happens when a background job rewrites a file in place while you have it mapped.
+The most famous trap is `SIGBUS`. If you map a file and then the file is truncated, or the mapped region falls past the end of the file, touching that page raises a bus error instead of a normal fault. This happens when a background job rewrites a file in place while you have it mapped.
 
-Mapping a file larger than RAM is fine, because not all of it is resident at once. What breaks is assuming it is all available instantly: touching far regions faults from disk, and under pressure those pages can be reclaimed and faulted again. An anonymous private mapping of a huge region is different: it is backed by RAM and swap, so it can push the system toward swapping if the working set is large.
+Mapping a file larger than RAM is fine, because not all of it is resident at once. What breaks is assuming it is all available instantly. Touching far regions faults from disk. Under pressure, those pages can be reclaimed and faulted again. An anonymous private mapping of a huge region is different. It is backed by RAM and swap. It can push the system toward swapping if the working set is large.
 
-Address space limits matter on 32-bit builds, where a few gigabytes of mapping can exhaust the space. Threads and `fork` interact badly with large mappings because the address space is duplicated or shared, and a `MAP_PRIVATE` file mapping in a forked child behaves with copy-on-write just like the heap does.
+Address space limits matter on 32-bit builds. A few gigabytes of mapping can exhaust the space. Threads and `fork` interact badly with large mappings because the address space is duplicated or shared. A `MAP_PRIVATE` file mapping in a forked child behaves with copy-on-write, just like the heap does.
 
-`MAP_SHARED` writes are not flushed immediately. If you write through a shared mapping and the machine crashes before writeback, those writes can be lost, unlike a direct `write` that you might `fsync`. Use `msync` when durability matters.
+`MAP_SHARED` writes are not flushed immediately. If you write through a shared mapping and the machine crashes before writeback, those writes can be lost. A direct `write` that you `fsync` would not lose them. Use `msync` when durability matters.
 
 ## Observing mappings and residency
 
-The mappings of a process are visible in `/proc/<pid>/maps`, and their memory accounting in `/proc/<pid>/smaps`. The latter shows, per mapping, its size, resident set, and the page size used, which is how you confirm a mapping is using huge pages or how much of it is actually resident.
+The mappings of a process are visible in `/proc/<pid>/maps`. Their memory accounting is in `/proc/<pid>/smaps`. The second file shows, per mapping, its size, resident set, and the page size used. This is how you confirm a mapping is using huge pages or how much of it is actually resident.
 
 ```go
 package main
@@ -168,35 +168,35 @@ grep -A6 "mmap-.*\.txt" /proc/$pid/smaps
 kill $pid
 ```
 
-What it shows is that the mapped file appears as a region in `maps`, and `smaps` breaks down how much of it is resident. For a production service, scanning `smaps` for the large mappings tells you which files are mapped, how much is actually in RAM, and whether huge pages are in use, which connects directly back to the TLB and working-set chapters.
+This shows that the mapped file appears as a region in `maps`. `smaps` breaks down how much of it is resident. For a production service, scanning `smaps` for the large mappings tells you which files are mapped. It tells you how much is actually in RAM and whether huge pages are in use. This links directly back to the TLB and working-set chapters.
 
 ## A realistic production example
 
-A service used a large read-only index file to answer queries. Each worker process opened the file and read it into its own buffer at startup, so the index was loaded once per worker and the total resident memory scaled with the number of workers. The team switched to mapping the file `MAP_PRIVATE` and sharing it across workers, which cut resident memory sharply because all workers pointed at the same cached pages.
+A service used a large read-only index file to answer queries. Each worker process opened the file and read it into its own buffer at startup. The index was loaded once per worker. The total resident memory grew with the number of workers. The team switched to mapping the file `MAP_PRIVATE` and sharing it across workers. This cut resident memory sharply because all workers pointed at the same cached pages.
 
-Then a deploy pipeline started rewriting that index file in place: it opened the existing path, truncated it, and wrote the new contents, rather than writing to a temporary file and renaming. A worker that had the old file mapped, and that touched a page past where the new truncated file ended, received `SIGBUS` and crashed. The mapping still pointed at the old inode for workers that held it, but the rewrite raced with workers that re-mapped, and the in-place truncation removed pages from under them.
+Then a deploy pipeline started rewriting that index file in place. It opened the existing path, truncated it, and wrote the new contents. It did not write to a temporary file and rename. A worker that had the old file mapped and touched a page past where the new truncated file ended got `SIGBUS` and crashed. The mapping still pointed at the old inode for workers that held it. The rewrite raced with workers that re-mapped. The in-place truncation removed pages from under them.
 
-The fix was to stop rewriting in place. The pipeline wrote the new index to a temporary file, called `fsync`, then renamed it over the old name. Renaming changes which inode the path points to but leaves existing mappings valid, because they hold the old inode. Workers that already had the old file mapped kept serving from it until they reloaded, and new workers mapped the new inode. They also added a signal handler for `SIGBUS` on the mapping as a belt-and-suspenders guard, so a truncated mapping would log and recover rather than crash. The lesson was that `mmap` couples your address space to a file's lifetime, and the safe pattern is immutable, versioned files that are replaced by rename, never truncated under a live mapping.
+The fix was to stop rewriting in place. The pipeline wrote the new index to a temporary file, called `fsync`, then renamed it over the old name. Renaming changes which inode the path points to. It leaves existing mappings valid because they hold the old inode. Workers that already had the old file mapped kept serving from it until they reloaded. New workers mapped the new inode. They also added a signal handler for `SIGBUS` on the mapping as a guard. A truncated mapping would then log and recover instead of crashing. The lesson is that `mmap` couples your address space to a file's lifetime. The safe pattern is immutable, versioned files that are replaced by rename. Never truncate a file under a live mapping.
 
 ## How engineers actually reason about mmap
 
-They choose it for sharing and for avoiding copies, not for every file. Small files, or files read once in a streaming fashion, are often simpler and faster with `read`. The win from `mmap` grows with file size and with how many readers or writers share the data.
+Engineers choose `mmap` for sharing and for avoiding copies. They do not use it for every file. Small files, or files read once in a stream, are often simpler and faster with `read`. The win from `mmap` grows with file size and with the number of readers or writers that share the data.
 
-They respect the coupling to the file. A live mapping assumes the file stays at least as large as the region touched, so the deployment and rotation story around that file matters as much as the `mmap` call itself. Immutable files swapped by rename are the safe default.
+They respect the coupling to the file. A live mapping assumes the file stays at least as large as the region touched. The deployment and rotation story around that file matters as much as the `mmap` call itself. Immutable files swapped by rename are the safe default.
 
-They think about residency. A mapped file is not free memory, and touching far parts faults from disk. `madvise` hints and, for the truly hot path, `mlock`, turn unpredictable faults into predictable behavior, but both cost memory that is then unavailable to the rest of the system.
+They think about residency. A mapped file is not free memory. Touching far parts faults from disk. `madvise` hints, and for the truly hot path `mlock`, turn unpredictable faults into predictable behavior. Both cost memory that is then unavailable to the rest of the system.
 
-They remember durability. Shared mappings are written back lazily, so important writes need `msync` or an explicit `fsync` path, or a crash can lose them.
+They remember durability. Shared mappings are written back lazily. Important writes need `msync` or an explicit `fsync` path, or a crash can lose them.
 
 ## Beyond the basic flags: fixed replacement, huge pages, locked and populated mappings, mremap, and mincore
 
-The common flags cover most uses, but a set of related options and helpers matter in production. `MAP_FIXED` overwrites whatever mapping already sits at the address, which can silently clobber your own code or libraries. `MAP_FIXED_NOREPLACE` does the opposite: it places the mapping only if the address is free and fails otherwise, which is almost always what you wanted `MAP_FIXED` for. Use the safe variant unless you are deliberately taking over a region you control.
+The common flags cover most uses, but a set of related options and helpers matter in production. `MAP_FIXED` overwrites whatever mapping already sits at the address. It can silently clobber your own code or libraries. `MAP_FIXED_NOREPLACE` does the opposite. It places the mapping only if the address is free and fails otherwise. This is almost always what you wanted `MAP_FIXED` for. Use the safe variant unless you are deliberately taking over a region you control.
 
-For special memory, `MAP_HUGETLB` requests the mapping from the huge-page pool, and `MAP_SYNC` (with a persistent-memory or DAX file) makes `msync` flush writes all the way to persistent media rather than just the page cache. `MAP_LOCKED` is the combination of `mmap` and `mlock` in one call so the region is pinned immediately, and `mlockall(MCL_FUTURE)` pins everything faulted in afterward. A related helper, `mremap`, grows or shrinks an existing mapping in place, which is how some allocators extend the heap and how a shared buffer is resized without copying. `mincore` answers a different question: given a range, which of its pages are currently resident, so a program can learn residency without faulting the pages in, which is useful for warmup checks and for predicting whether the next access will be a hit or a major fault.
+For special memory, `MAP_HUGETLB` requests the mapping from the huge-page pool. `MAP_SYNC` (with a persistent-memory or DAX file) makes `msync` flush writes all the way to persistent media instead of just the page cache. `MAP_LOCKED` combines `mmap` and `mlock` in one call so the region is pinned immediately. `mlockall(MCL_FUTURE)` pins everything faulted in afterward. A related helper is `mremap`. It grows or shrinks an existing mapping in place. Some allocators use it to extend the heap. A shared buffer is resized with it without copying. `mincore` answers a different question. Given a range, which of its pages are currently resident. A program can learn residency without faulting the pages in. This is useful for warmup checks and for predicting whether the next access will be a hit or a major fault.
 
 ## memfd, anonymous shared memory, and fork and core-dump safety
 
-Not every shared mapping needs a file on a visible filesystem. `memfd_create` makes an anonymous file that lives in tmpfs, has no path, and can be shared with another process by passing its descriptor over a Unix socket or through `fork`. Because it is a real file descriptor, it can also be sealed with `F_SEAL_SEAL`, `F_SEAL_SHRINK`, `F_SEAL_GROW`, and `F_SEAL_WRITE` so that a receiver can trust the contents will not change underneath it. This is the modern, safer basis for passing shared memory and for sandboxing, and it ties directly to the sealing discussion from the file-descriptor article.
+Not every shared mapping needs a file on a visible filesystem. `memfd_create` makes an anonymous file that lives in tmpfs. It has no path. It can be shared with another process by passing its descriptor over a Unix socket or through `fork`. Because it is a real file descriptor, it can be sealed with `F_SEAL_SEAL`, `F_SEAL_SHRINK`, `F_SEAL_GROW`, and `F_SEAL_WRITE`. A receiver can then trust the contents will not change underneath it. This is the modern, safer basis for passing shared memory and for sandboxing. It links directly to the sealing discussion from the file-descriptor article.
 
 ```mermaid
 flowchart LR
@@ -205,13 +205,13 @@ flowchart LR
     C --> D[Both map it MAP_SHARED]
 ```
 
-The older paths still exist: POSIX shared memory via `shm_open` plus `mmap`, and the legacy System V `shmget` and `shmat`. They work, but they leak named objects and lack sealing, which is why `memfd` is preferred for new code. Fork and core-dump safety matter when a mapping holds secrets. `MADV_DONTFORK` excludes a region from the child after `fork`, so a child that goes on to `exec` another program never sees a parent's keys. `MADV_DONTDUMP` keeps a region out of core dumps for the same reason, and `MADV_WIPEONFORK` zeroes the region in the child so the child can never read the parent's copy. On the other side, `MADV_MERGEABLE` lets the kernel deduplicate identical pages across processes, a feature called KSM that saves memory for many similar guests or containers at some CPU cost.
+The older paths still exist. POSIX shared memory uses `shm_open` plus `mmap`. The legacy System V `shmget` and `shmat` also work. They leak named objects and lack sealing. This is why `memfd` is preferred for new code. Fork and core-dump safety matter when a mapping holds secrets. `MADV_DONTFORK` excludes a region from the child after `fork`. A child that goes on to `exec` another program never sees a parent's keys. `MADV_DONTDUMP` keeps a region out of core dumps for the same reason. `MADV_WIPEONFORK` zeroes the region in the child so the child can never read the parent's copy. On the other side, `MADV_MERGEABLE` lets the kernel deduplicate identical pages across processes. This feature is called KSM. It saves memory for many similar guests or containers at some CPU cost.
 
 ## Making mapped writes durable with msync
 
-A `MAP_SHARED` write lands in the page cache and is written back lazily, so it is not durable until the kernel decides to flush. `msync` forces that flush for a range. `MS_SYNC` blocks until the pages are written back to the file on storage, `MS_ASYNC` schedules the writeback without waiting, and `MS_INVALIDATE` discards cached copies so later reads come from the file. For correctness across a crash, `msync(MS_SYNC)` (or an `fsync` on the underlying file descriptor) is what turns a shared mapped write into a committed one, and only after that can you assume the bytes will survive power loss.
+A `MAP_SHARED` write lands in the page cache and is written back lazily. It is not durable until the kernel decides to flush. `msync` forces that flush for a range. `MS_SYNC` blocks until the pages are written back to the file on storage. `MS_ASYNC` schedules the writeback without waiting. `MS_INVALIDATE` discards cached copies so later reads come from the file. For correctness across a crash, `msync(MS_SYNC)` (or an `fsync` on the underlying file descriptor) turns a shared mapped write into a committed one. Only after that can you assume the bytes will survive power loss.
 
-This is the mapped analog of the durability rules from the storage stage. The trap is assuming a write through a pointer is saved just because it returned: like a buffered `write`, it is only a promise to the cache until explicitly synced. The difference is that a mapped write has no `write` call to attach the sync to, so the discipline is to call `msync` on the exact range you need durable, and to do it on a cadence rather than after every write.
+This is the mapped version of the durability rules from the storage stage. The trap is assuming a write through a pointer is saved just because it returned. Like a buffered `write`, it is only a promise to the cache until explicitly synced. The difference is that a mapped write has no `write` call to attach the sync to. The discipline is to call `msync` on the exact range you need durable. Do it on a cadence rather than after every write.
 
 ## Definitions
 
@@ -275,4 +275,4 @@ This is the mapped analog of the durability rules from the storage stage. The tr
 
 ## Summary
 
-`mmap` projects files, devices, or anonymous regions into the address space so they are reached through pointers, with the kernel turning accesses into page-cache reads, copy-on-write, or shared writes. The sharing mode decides whether writes are visible and durable, the page cache means the bytes live once and are shared with every reader, and `madvise` or `mlock` trade memory for predictable faults. The coupling to the file's lifetime is the real hazard, and the safe pattern is immutable files replaced by rename. The next chapter steps down from these system mappings to the memory a program asks for day to day, through stack and heap layout and the allocators that hand it out.
+`mmap` projects files, devices, or anonymous regions into the address space so they are reached through pointers. The kernel turns accesses into page-cache reads, copy-on-write, or shared writes. The sharing mode decides whether writes are visible and durable. The page cache means the bytes live once and are shared with every reader. `madvise` or `mlock` trade memory for predictable faults. The coupling to the file's lifetime is the real hazard. The safe pattern is immutable files replaced by rename. The next chapter moves down from these system mappings to the memory a program asks for day to day. It covers stack and heap layout and the allocators that hand it out.

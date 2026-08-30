@@ -10,17 +10,17 @@ stage_order: 3
 series_order: 4
 ---
 
-The previous chapter explained caches and how cores keep copies consistent. This chapter is about the rules that decide what a thread can rely on when it reads memory written by another thread. It is the fourth chapter of Stage 3.
+Earlier we explained caches and how cores keep their copies in sync. This chapter gives the rules. The rules say what one thread can trust when it reads memory written by another thread. This is the fourth chapter in Stage 3.
 
-When several threads use the same memory, the question is not how fast a single write is. It is when another thread can see that write, and what else it sees at the same time.
+When threads share memory, the real question is not how fast a write is. It is when the other thread can see that write. It is also what else the other thread sees at that moment.
 
-A shared counter shows the first part. Two threads each try to add one to a counter that starts at zero. You expect the result to be two. Without a rule, it can be one, because the operations interleave. An atomic operation is one that cannot be seen halfway through, so it fixes the counter.
+A shared counter shows the first problem. Two threads each add one to a counter that starts at zero. You expect the answer to be two. Without protection, the answer can be one because the two updates clash. An atomic operation cannot be seen partway through. It fixes the counter.
 
-A flag that publishes other data shows the second part. One thread prepares data and then sets a flag to say it is ready. Another thread waits for the flag and then reads the data. You expect the reader to see the prepared data once the flag is set. That expectation is only true if the program uses synchronization that links the flag to the data. The link is not the order in which you wrote the lines. It is the ordering guarantee you choose, like release on the writer and acquire on the reader.
+A flag that publishes data shows the second problem. One thread fills a buffer with data. Then it sets a flag to say the data is ready. Another thread waits for the flag. Then it reads the buffer. You expect the reader to see the data after the flag is set. That only works if the program links the flag to the data with synchronization. The link does not come from the order you wrote the lines. It comes from the ordering guarantee you pick. The writer uses release. The reader uses acquire.
 
 ## Start with a counter
 
-A counter that many threads increment looks simple, but it is a read, an addition, and a write.
+A counter that many threads increment looks simple. In truth it is a read, an add, and a write.
 
 ```text
 counter starts at 0
@@ -34,44 +34,44 @@ expected: 2
 actual: 1
 ```
 
-Both workers read the old value before either writes the new one, so one update is lost. This happens when the result depends on the timing of operations that can interleave. In that case we say there is a race condition. A data race is the specific case where two threads access the same memory, at least one is a write, and the accesses are not ordered by synchronization.
+Both workers read the old value before either writes the new one. One update is lost. This happens when the result depends on timing of operations that can clash. We call this a race condition. A data race is one kind of race. Two threads touch the same memory. At least one of them writes. The accesses are not ordered by synchronization.
 
-The fix for counting is to make the increment indivisible. An atomic operation on a shared object cannot be observed as a partial update. Another thread does not see half the old bits and half the new bits. With an atomic increment, the final value is correctly two.
+To fix counting, make the increment indivisible. An atomic operation on a shared object cannot be seen as a partial update. No other thread sees half old bits and half new bits. With an atomic increment, the final value is correctly two.
 
-Atomicity fixes the counter, but it does not by itself fix publishing other data together with a flag. That needs ordering.
+Atomicity fixes the counter. It does not by itself fix publishing other data with a flag. That needs ordering.
 
 ## Three questions worth separating
 
-When you look at shared memory, it helps to ask three separate questions.
+When you look at shared memory, ask three separate questions.
 
-The first is whether an operation is atomic. This asks whether another thread can see the operation halfway through. A store of an atomic integer is not seen as half old and half new.
+First, is the operation atomic? This asks whether another thread can see it partway through. A store of an atomic integer is never seen as half old and half new.
 
-The second is whether a write becomes visible to another thread. Eventually hardware will make it visible, but the language only lets you rely on it when you use the required synchronization. Without that, the access may be a data race and the program has undefined behavior in C and C++.
+Second, does a write become visible to another thread? The hardware will make it visible eventually. You can only rely on that when you use the required synchronization. Without it, the access may be a data race. In C and C++, this is undefined behavior. That means the language makes no promise about what the program does.
 
-The third is whether operations are ordered. If one thread sees that a flag is set, is it guaranteed to see the data that was written before the flag? Atomicity of the flag alone does not promise that. Ordering decides what other writes travel with the flag.
+Third, are the operations ordered? Suppose a thread sees that a flag is set. Is it guaranteed to see the data written before the flag? Atomicity of the flag alone does not promise this. Ordering decides which other writes travel with the flag.
 
 ## The compiler reorders too
 
-Before the CPU runs anything, the compiler is allowed to change the order of operations as long as the current thread still behaves as required by the language. It can move independent stores, keep a value in a register instead of reloading it, or remove a load whose result is not used.
+Before the CPU runs the code, the compiler may change the order of operations. It may do this as long as the current thread still behaves as the language requires. It can move independent stores. It can keep a value in a register instead of reloading it. It can drop a load whose result is never used.
 
-The following two lines look ordered, but for another thread the order only matters if you use synchronization.
+The two lines below look ordered. For another thread, the order only matters if you use synchronization.
 
 ```c
 data = 42;
 ready = 1;
 ```
 
-In a single thread, the compiler must keep the effect that the program can observe. For another thread, the compiler is not required to keep the order unless the accesses use atomics or locks that create a rule between threads. Adding `volatile` does not fix this in general. `volatile` tells the compiler that an access has observable side effects, which is useful for a device register, but it does not make the access atomic and it does not publish surrounding writes.
+In a single thread, the compiler must keep the effect the program can observe. For another thread, the compiler need not keep the order. It only keeps it when the accesses use atomics or locks that make a rule between threads. Adding `volatile` does not fix this. `volatile` tells the compiler that an access has observable side effects. That is useful for a device register. It does not make the access atomic. It does not publish the writes around it.
 
-The rule is to use the memory model of the language, not the order you wrote the source or the assembly one build produced.
+The rule is to use the memory model of the language. Do not trust the order you wrote in source. Do not trust the order from one build's assembly.
 
 ## The CPU and its buffers reorder as well
 
-The CPU also reorders. It can execute independent instructions out of order to keep its execution units busy, and it can keep stores in a small buffer before they become visible to other cores. Loads can be tracked in a buffer and completed when data arrives.
+The CPU also reorders. It can run independent instructions out of order to keep its units busy. It can hold stores in a small store buffer (a holding area for writes) before other cores see them. It can track loads in a buffer and finish them when data arrives.
 
-These buffers help performance. A core does not have to stop every time a store waits for a cache line to be obtained. It can continue with useful work while the store waits.
+These buffers help performance. A core need not stop each time a store waits for a cache line. It can keep doing useful work while the store waits.
 
-The effect is that three orders are different. The order you wrote, the order the CPU executes internally, and the order another core observes can be different. The language and the architecture together decide which observations a program may rely on.
+The result is three different orders. The order you wrote. The order the CPU runs inside. The order another core sees. These can all differ. The language and the hardware together decide which observations a program may rely on.
 
 ```mermaid
 flowchart LR
@@ -80,11 +80,11 @@ flowchart LR
     C --> D[Other core observes after coherence]
 ```
 
-You do not control these buffers directly from application code. They explain why you need explicit ordering operations and why a program that looks ordered can still need synchronization.
+Application code does not control these buffers directly. They explain why you need explicit ordering operations. They explain why a program that looks ordered can still need synchronization.
 
 ## The flag that publishes data
 
-Suppose one thread prepares data and then signals another thread. The simplest attempt uses ordinary variables.
+Suppose one thread prepares data and then signals another thread. The simplest attempt uses plain variables.
 
 ```c
 int data = 0;
@@ -100,7 +100,7 @@ if (ready == 1) {
 }
 ```
 
-This program has a race. The reader may never be promised to see `data` as 42 after seeing `ready` as 1, and in C the unsynchronized accesses make the program undefined. A correct version uses an atomic flag where the writer publishes and the reader observes.
+This program has a race. The reader is never promised to see `data` as 42 after seeing `ready` as 1. In C, the unsynchronized accesses give the program undefined behavior. A correct version uses an atomic flag. The writer publishes and the reader observes.
 
 ```c
 #include <stdatomic.h>
@@ -118,11 +118,11 @@ if (atomic_load_explicit(&ready, memory_order_acquire) == 1) {
 }
 ```
 
-The store that uses release publishes the earlier write to `data`. The load that uses acquire and reads the value written by that release is allowed to rely on the published data. The important point is the pair. The writer's release and the reader's acquire together create the link. An atomic flag alone, without that pairing, does not publish surrounding data. This example publishes once and assumes `data` is not changed again after the flag is set.
+The release store publishes the earlier write to `data`. The acquire load reads the value written by that release. The reader can rely on the published data. The key point is the pair. The writer's release and the reader's acquire work together to make the link. An atomic flag alone, without that pair, does not publish the data around it. This example publishes once. It assumes `data` is not changed again after the flag is set.
 
 ## Happens-before as a reasoning tool
 
-It helps to speak of one operation happening before another from the program's point of view. If a write happens before a read, the read can rely on that write.
+Happens-before is a way to reason about ordering. It says one operation happens before another from the program's view. If a write happens before a read, the read can rely on that write.
 
 In the publication above, the relationship looks like this.
 
@@ -138,11 +138,11 @@ writer: release store to ready = 1
 reader: read data
 ```
 
-The release and the acquire create the edge across threads. Without that edge, the source order inside the writer does not by itself give the reader a guarantee. Happens-before is a way to reason about the program, not a wire between cores. The hardware provides the guarantee with fences, cache messages, and the right instructions for the processor.
+The release and the acquire make the edge across threads. Without that edge, the source order inside the writer does not give the reader a guarantee. Happens-before is a way to reason about the program. It is not a wire between cores. The hardware gives the guarantee with fences, cache messages, and the right instructions for the processor.
 
 ## Release and acquire
 
-Release and acquire are designed for publishing. A store with release says that earlier writes in the same thread should be made available to a thread that does a matching acquire. A load with acquire says that later reads in the same thread can rely on what was published, once the acquire has observed the release.
+Release and acquire are built for publishing. A release store says the earlier writes in that thread should be made available to any thread that does a matching acquire. An acquire load says the later reads in that thread can rely on what was published. This holds once the acquire has seen the release.
 
 ```mermaid
 flowchart LR
@@ -151,13 +151,13 @@ flowchart LR
     C --> D[Reader uses object]
 ```
 
-This does not stop the whole machine. It creates a targeted link around that flag. It is often cheaper than a stronger ordering that would order many more operations. The link only exists if the reader's acquire actually reads the value written by the writer's release. If it reads a different value, the publication did not happen for that read.
+This does not stop the whole machine. It makes a targeted link around that flag. It is often cheaper than a stronger ordering that would order many more operations. The link only exists if the reader's acquire actually reads the value from the writer's release. If it reads a different value, the publication did not happen for that read.
 
 ## When you want one global order
 
 Sometimes you want atomic operations to appear in one global order that respects each thread's own order. That stronger model is called sequential consistency, often written as `seq_cst`.
 
-It gives a simpler way to reason about the atomic operations themselves, because they seem to happen in one shared sequence. It does not make ordinary non-atomic accesses safe, and it does not fix a bad algorithm on its own. It is often a good choice when the synchronization is not on a hot path and clarity matters. If performance requires it and you can reason precisely, a weaker ordering can be correct, but using a weaker ordering than the algorithm needs is wrong.
+It gives a simpler way to reason about the atomic operations themselves, because they seem to happen in one shared sequence. It does not make ordinary non-atomic accesses safe. It does not fix a bad algorithm on its own. It is a good choice when the synchronization is not on a hot path and clarity matters. If performance requires it and you can reason precisely, a weaker ordering can be correct. Using a weaker ordering than the algorithm needs is wrong.
 
 ## When atomicity without ordering is enough
 
@@ -174,7 +174,7 @@ If the only promise you need is that increments are not lost and you will eventu
 
 ## Fences
 
-A fence, also called a barrier, is an operation that constrains ordering around it. The compiler must also respect its meaning.
+A fence, also called a barrier, is an operation that limits how the code around it may be reordered. The compiler must also respect its meaning.
 
 You sometimes see a pattern where a fence is placed before publishing or after observing.
 
@@ -194,7 +194,7 @@ The exact instruction and its cost depend on the processor. On some architecture
 
 ## Store buffers and a small test
 
-A store buffer lets a core keep a write while it continues. That is why another core may not see the write at the exact moment the first core executed the store.
+A store buffer (a small holding area for writes) lets a core keep a write while it continues. That is why another core may not see the write at the exact moment the first core executed the store.
 
 Consider two atomic flags that start at zero and two threads that each set one flag and read the other, both using relaxed ordering.
 
@@ -208,15 +208,15 @@ atomic_store_explicit(&y, 1, memory_order_relaxed);
 int r1 = atomic_load_explicit(&x, memory_order_relaxed);
 ```
 
-It is possible for both reads to see zero, even though each thread set its own flag. Each core can read the other flag before the other core's store has become visible to it. This surprises people who picture a single global timeline, but it can happen with weaker ordering.
+It is possible for both reads to see zero, even though each thread set its own flag. Each core can read the other flag before the other core's store has become visible to it. This surprises people who picture a single global timeline. It can happen with weaker ordering.
 
-With a stronger ordering like sequential consistency, the outcomes are more restricted. The details depend on the language rules and the architecture, but the lesson is stable. Seeing a write from another core is not instantaneous, and the ordering you chose decides which outcomes are allowed.
+With a stronger ordering like sequential consistency, the outcomes are more restricted. The details depend on the language rules and the architecture. The lesson is stable. Seeing a write from another core is not instant. The ordering you chose decides which outcomes are allowed.
 
-This kind of small program is sometimes called a litmus test. It is useful for learning and for checking a low-level assumption, but not seeing a result in a test does not prove the result can never happen.
+This kind of small program is sometimes called a litmus test. It is useful for learning and for checking a low-level assumption. Not seeing a result in a test does not prove the result can never happen.
 
 ## Loads, speculation, and early reads
 
-Cores also keep track of outstanding loads and can issue a later load before an earlier operation has fully completed when the architecture allows it. Speculation lets the CPU guess a path and then discard work if the guess was wrong.
+Cores also track outstanding loads. They can issue a later load before an earlier operation has finished when the architecture allows it. Speculation lets the CPU guess a path and then discard the work if the guess was wrong.
 
 This is another reason source order alone is not a guarantee for other threads. The architecture decides whether a later read that was issued early can affect what the program is allowed to observe.
 
@@ -224,7 +224,7 @@ Again, these buffers are implementation details, not something application code 
 
 ## Operations that read and write in one step
 
-Some algorithms need to read a value, compute a new one, and publish it as a single indivisible step. These are atomic read-modify-write operations. Examples are atomic increment, exchange, fetch-and-add, and compare-and-swap.
+Some algorithms need to read a value, compute a new one, and publish it as a single indivisible step. These are atomic read-modify-write operations. Examples include atomic increment, exchange, fetch-and-add, and compare-and-swap.
 
 Compare-and-swap checks whether the memory still holds an expected value and, if it does, replaces it.
 
@@ -251,11 +251,11 @@ bool try_claim(_Atomic int *state) {
 
 The function tries to change the state from available to claimed. If another thread claimed it first, the call fails. The example shows only the indivisible transition, not a full lock.
 
-A loop that retries compare-and-swap can build counters, stacks, and queues. It can be fast when contention is low, but many threads retrying can become expensive. It also brings hard problems like the ABA problem, safe memory reclamation, and progress guarantees. In many cases a mutex is the simpler and better choice.
+A loop that retries compare-and-swap can build counters, stacks, and queues. It can be fast when contention is low. Many threads retrying can become expensive. It also brings hard problems like the ABA problem, safe memory reclamation, and progress guarantees. In many cases a mutex is the simpler and better choice.
 
 ## The ABA problem
 
-ABA happens when a thread reads a value `A`, another thread changes it to `B` and then back to `A`, and the first thread's compare-and-swap sees `A` and succeeds even though the value went through another state in between.
+ABA happens when a thread reads a value `A`. Another thread changes it to `B` and then back to `A`. The first thread's compare-and-swap sees `A` and succeeds, even though the value went through another state in between.
 
 ```text
 Thread 0 reads A
@@ -263,11 +263,11 @@ Thread 1 changes A to B then back to A
 Thread 0 compare-and-swap for A succeeds, but missed the intermediate change
 ```
 
-Whether this matters depends on what the value represents. For a pointer to a node that can be removed, freed, and reused at the same address, it can be a real bug. Techniques like version counters, tagged pointers, hazard pointers, or epoch reclamation are needed. This is why using atomics instead of locks is not just a replacement. The hardware gives you building blocks. The algorithm must still define ownership, lifetime, and what happens under contention.
+Whether this matters depends on what the value represents. For a pointer to a node that can be removed, freed, and reused at the same address, it can be a real bug. You need techniques like version counters, tagged pointers, hazard pointers, or epoch reclamation. This is why swapping to atomics from locks is not just a shortcut. The hardware gives you building blocks. The algorithm must still define ownership, lifetime, and what happens under contention.
 
 ## A mutex also uses atomic hardware
 
-A mutex looks like a higher-level blocking primitive, but its fast path is built from atomics. A thread tries to change the mutex from unlocked to locked as an atomic step. If it cannot acquire it, the runtime may put it to sleep and wake it later.
+A mutex looks like a higher-level blocking primitive. Its fast path is built from atomics. A thread tries to change the mutex from unlocked to locked as one atomic step. If it cannot acquire it, the runtime may put it to sleep and wake it later.
 
 ```mermaid
 flowchart TD
@@ -278,11 +278,11 @@ flowchart TD
     C --> F[Release with atomic]
 ```
 
-The atomic operation protects the lock state itself. Releasing the lock with release makes writes inside the critical section available, and acquiring the lock with acquire lets the next owner see them.
+The atomic operation protects the lock state itself. Releasing the lock with release makes writes inside the critical section available. Acquiring the lock with acquire lets the next owner see them.
 
 ## Atomicity is not lock-freedom
 
-An atomic operation is indivisible for that object. Lock-freedom is a different kind of guarantee about progress. A lock-free algorithm promises that the system as a whole keeps making progress even if one thread is delayed, but a single thread may still starve. Wait-freedom is stronger. It promises that every operation finishes in a bounded number of its own steps.
+An atomic operation is indivisible for that object. Lock-freedom is a different kind of progress guarantee. A lock-free algorithm promises that the system as a whole keeps making progress even if one thread is delayed. A single thread may still starve, which means it can wait forever. Wait-freedom is stronger. It promises that every operation finishes in a bounded number of its own steps.
 
 ```text
 Atomic:    this operation is indivisible
@@ -290,17 +290,17 @@ Lock-free: some thread makes progress
 Wait-free: every operation finishes in a bounded number of steps
 ```
 
-A loop that retries compare-and-swap uses atomics and can be lock-free if some thread always succeeds, but it is not necessarily wait-free for each thread. A mutex can be correct and fast enough while providing blocking instead of lock-free progress.
+A loop that retries compare-and-swap uses atomics. It can be lock-free if some thread always succeeds. It is not necessarily wait-free for each thread. A mutex can be correct and fast enough while it blocks instead of giving lock-free progress.
 
 ## Why code can work on one CPU and fail on another
 
-Different processors provide different ordering guarantees for ordinary loads and stores. Code that happens to work on x86, which is relatively strong, may fail on ARM, which is weaker. The compiler can also reorder, so the program may already be undefined in the language even before it runs. This is common when code is only tested on one kind of machine and later runs on another.
+Different processors give different ordering guarantees for ordinary loads and stores. Code that happens to work on x86 (which is relatively strong) may fail on ARM (which is weaker). The compiler can also reorder. So the program may already be undefined in the language before it runs. This is common when code is only tested on one kind of machine and later runs on another.
 
 Portable concurrent code should use the atomics and synchronization that the language provides. Architecture-specific instructions are appropriate only in a small, carefully reviewed low-level piece that states the required guarantee for each target.
 
 ## A correct single-writer example
 
-The following publishes one integer with a flag. One thread writes the integer and then publishes, the other thread checks the flag and then reads.
+The following publishes one integer with a flag. One thread writes the integer and then publishes. The other thread checks the flag and then reads.
 
 ```c
 #include <stdatomic.h>
@@ -324,15 +324,15 @@ int try_read(const struct Message *m, int *out) {
 }
 ```
 
-The store with release is the point where the earlier write to `value` is published. The load with acquire is the point where a reader that sees the published value can safely read it. This example publishes once. A reusable queue needs more, like who owns each slot and when it can be overwritten, which cannot be omitted just because the flag is atomic.
+The store with release is the point where the earlier write to `value` is published. The load with acquire is the point where a reader that sees the published value can safely read it. This example publishes once. A reusable queue needs more. It needs to know who owns each slot and when it can be overwritten. You cannot skip that just because the flag is atomic.
 
 ## How to look for ordering problems
 
-Ordering problems are hard to see because they are rare and timing dependent. Adding logging can hide them by changing timing. A passing test does not prove ordering is correct.
+Ordering problems are hard to see because they are rare and depend on timing. Adding logging can hide them by changing timing. A passing test does not prove ordering is correct.
 
 Start with the code and the language rules. List every shared object, who writes it, who reads it, and which operation links them. If you cannot point to a link between the writer and the reader, the code deserves a closer look.
 
-Thread sanitizers can find many data races, but they do not prove that the ordering you intended is correct. Stress tests that run the protocol many times with different inputs and thread counts help, and running on different architectures can show assumptions. Counters can show contention, but they usually cannot prove a particular ordering bug. A program can be correct but slow because many cores fight over one atomic, or it can be fast in a short test while still being wrong.
+Thread sanitizers can find many data races. They do not prove that the ordering you intended is correct. Stress tests help. Run the protocol many times with different inputs and thread counts. Running on different architectures can show hidden assumptions. Counters can show contention. They usually cannot prove a particular ordering bug. A program can be correct but slow because many cores fight over one atomic. It can also be fast in a short test while still being wrong.
 
 On Linux, a C program can be built with ThreadSanitizer where the compiler supports it.
 
@@ -344,25 +344,25 @@ A good stress test runs the algorithm many times with varied scheduling rather t
 
 ## Choosing between a mutex and an atomic
 
-Use a mutex when the work is naturally a critical section, when contention is moderate, or when blocking is acceptable. A mutex gives a clear ownership rule and makes more complex invariants easier to protect.
+Use a mutex when the work is naturally a critical section. Use it when contention is moderate, or when blocking is acceptable. A mutex gives a clear ownership rule. It makes more complex invariants easier to protect.
 
-Use an atomic variable when the state is small, the operation is naturally indivisible, and the ordering need is easy to state. Counters, flags, reference counts, and simple state changes are typical cases.
+Use an atomic variable when the state is small. Use it when the operation is naturally indivisible and the ordering need is easy to state. Counters, flags, reference counts, and simple state changes are typical cases.
 
-Consider a lock-free or wait-free structure only when measurement shows that blocking is a real problem and the team can maintain the more complex code. The design must cover memory reclamation, shutdown, starvation, testing, and observability.
+Use a lock-free or wait-free structure only when measurement shows that blocking is a real problem and the team can maintain the more complex code. The design must cover memory reclamation, shutdown, starvation, testing, and observability.
 
-Consider passing work through a queue instead of sharing memory when too many threads need synchronization on the same data. Moving an item through a queue makes ownership clear, although the queue itself still needs synchronization and can become a source of backpressure.
+Pass work through a queue instead of sharing memory when too many threads need synchronization on the same data. Moving an item through a queue makes ownership clear. The queue itself still needs synchronization. It can become a source of backpressure.
 
-For production, the question is rarely which primitive is fastest in theory. It is which design is correct, has acceptable latency, is understandable, and can be maintained at a cost the team can carry.
+In production, the question is rarely which primitive is fastest in theory. It is which design is correct. It must have acceptable latency. It must be understandable. The team must be able to maintain it at a cost they can carry.
 
 ## How the hardware actually implements an atomic
 
-Atomicity has to come from somewhere below the language. On x86, most read-modify-write atomic operations are implemented with a `LOCK` prefix on the instruction. The prefix tells the CPU to lock the cache line for the duration of the operation: it performs the read, the modification, and the write as one coherent transaction, and it issues the read-for-ownership that makes other cores wait for that line. This is why an atomic increment is not three separate visible steps, and also why it costs a coherence transaction.
+Atomicity has to come from somewhere below the language. On x86, most read-modify-write atomic operations use a `LOCK` prefix on the instruction. The prefix tells the CPU to lock the cache line for the duration of the operation. It performs the read, the modification, and the write as one coherent transaction. It issues a read-for-ownership (a request that grabs exclusive control of a cache line) that makes other cores wait for that line. This is why an atomic increment is not three separate visible steps. It is also why it costs a coherence transaction.
 
-On ARM and other weak-memory architectures, atomics are usually built from load-link and store-conditional, written `LL` and `SC`. The core loads a value and tags the line as monitored. The store-conditional writes only if no other core modified that line in between. If another core did, the store fails and the loop retries. Both approaches turn an atomic into a cache-line ownership event, which is the bridge between this chapter and the cache coherence chapter: an atomic is, at the hardware level, an enforced exclusive access to a cache line.
+On ARM and other weak-memory architectures, atomics are usually built from load-link and store-conditional, written `LL` and `SC`. The core loads a value and tags the line as monitored. The store-conditional writes only if no other core modified that line in between. If another core did, the store fails and the loop retries. Both approaches turn an atomic into a cache-line ownership event. This is the bridge between this chapter and the cache coherence chapter. At the hardware level, an atomic is an enforced exclusive access to a cache line.
 
 ## Double-checked locking: a real acquire and release pattern
 
-A recurring need is lazy initialization: create an expensive object the first time it is requested, then reuse it. The unsafe version checks a flag, and if it is unset, builds the object and sets the flag. The bug is that another thread can see the flag set but read the object before its fields are initialized, because the writes can be reordered.
+A recurring need is lazy initialization. You create an expensive object the first time it is requested, then reuse it. The unsafe version checks a flag. If it is unset, the code builds the object and sets the flag. The bug is that another thread can see the flag set but read the object before its fields are initialized. The writes can be reordered.
 
 The fix uses release on the publishing store and acquire on the reading load, with the check done twice:
 
@@ -379,19 +379,19 @@ if (atomic_load_explicit(&ready, memory_order_acquire) == 0) {
 // now ready == 1 implies the object is fully built
 ```
 
-The outer acquire load lets most threads skip the lock after initialization, while the release store guarantees that any thread that sees `ready` also sees the completed object. This is the prototypical example of release and acquire protecting data other than the flag itself.
+The outer acquire load lets most threads skip the lock after initialization. The release store guarantees that any thread that sees `ready` also sees the completed object. This is the prototypical example of release and acquire protecting data other than the flag itself.
 
 ## The cost of a contended atomic and the per-core counter pattern
 
-An atomic is cheap when few writers touch it, but a single shared atomic counter written by every core becomes a coherence bottleneck. Every successful write goes through a read-for-ownership that bounces the cache line between cores, so the writers serialize on that line even though the increment itself is small. Under many cores, throughput can fall as you add writers, the same phenomenon as false sharing but for one genuinely shared atomic.
+An atomic is cheap when few writers touch it. A single shared atomic counter written by every core becomes a coherence bottleneck. Every successful write goes through a read-for-ownership that bounces the cache line between cores. The writers serialize on that line even though the increment itself is small. Under many cores, throughput can fall as you add writers. This is the same as false sharing (two cores fighting over the same cache line), but for one genuinely shared atomic.
 
-The scalable answer is the per-core counter pattern. Each core increments a counter in its own cache line, which stays local and cheap, and the program sums the per-core counters when it needs the total. The tradeoff is that the total is slightly stale between merges, so this fits request counts and statistics more than a value that must be exactly current on every read. The pattern appears throughout the concurrency and scheduler chapters: prefer ownership by one core over constant cross-core writes.
+The scalable answer is the per-core counter pattern. Each core increments a counter in its own cache line. That stays local and cheap. The program sums the per-core counters when it needs the total. The tradeoff is that the total is slightly stale between merges. This fits request counts and statistics more than a value that must be exactly current on every read. The pattern appears throughout the concurrency and scheduler chapters. Prefer ownership by one core over constant cross-core writes.
 
 ## Why the same atomic costs differently on x86 and ARM
 
-The correctness rules are the same once you use the language's atomics, but the performance differs by architecture. x86 has a relatively strong memory model, so even sequential consistency often maps to ordinary cache-line locking without an extra barrier, which is why code that relies on accidental ordering sometimes appears to work there. ARM and similar weak-memory designs need an explicit barrier, such as a `DMB` instruction, to honor acquire, release, or sequential consistency, so the same source can execute more barrier instructions and run slower.
+The correctness rules are the same once you use the language's atomics. The performance differs by architecture. x86 has a relatively strong memory model. Even sequential consistency often maps to ordinary cache-line locking without an extra barrier. This is why code that relies on accidental ordering sometimes appears to work there. ARM and similar weak-memory designs need an explicit barrier, such as a `DMB` instruction, to honor acquire, release, or sequential consistency. The same source can run more barrier instructions and run slower.
 
-This is why a benchmark that passes on a developer's x86 laptop can behave differently on an ARM server: the laptop may hide a missing barrier because the hardware rarely reorders that pattern, while the server both can reorder and must pay for the barrier to stay correct. The rule is to write the ordering the algorithm needs, then measure; do not assume the cheaper architecture is the correct one.
+This is why a benchmark that passes on a developer's x86 laptop can behave differently on an ARM server. The laptop may hide a missing barrier because the hardware rarely reorders that pattern. The server both can reorder and must pay for the barrier to stay correct. The rule is to write the ordering the algorithm needs, then measure. Do not assume the cheaper architecture is the correct one.
 
 ## Definitions
 
@@ -459,12 +459,12 @@ This is why a benchmark that passes on a developer's x86 laptop can behave diffe
 
 **"Flushing a cache line fixes sharing."** Cache maintenance is architecture specific and is about caches, while thread synchronization needs the ordering that the language provides.
 
-**"Sequential consistency fixes every bug."** It gives a strong order for atomic operations, but it does not fix wrong ownership, missing lifetime handling, or data races on non-atomic objects.
+**"Sequential consistency fixes every bug."** It gives a strong order for atomic operations. It does not fix wrong ownership, missing lifetime handling, or data races on non-atomic objects.
 
-**"Lock-free means faster."** Lock-free can avoid blocking, but it often costs more under contention and is harder to check and maintain.
+**"Lock-free means faster."** Lock-free can avoid blocking. It often costs more under contention and is harder to check and maintain.
 
 ## Summary
 
 When threads share memory, three questions matter. Can an operation be seen partially, when does another thread see it, and what other operations are ordered around it. Atomicity, visibility, and ordering answer different parts.
 
-The compiler and the CPU reorder work to make it faster. Atomics, release and acquire, sequential consistency, fences, and locks give you the guarantees you choose. Use the smallest ordering that is clearly correct when performance requires it, but prefer a simpler design when the cost has not been measured. The most reliable way to reason about concurrent code is to name who owns what, list the shared state, draw the links, and state which transitions are allowed. If the explanation relies on what the CPU probably does first, it is not yet a correctness argument.
+The compiler and the CPU reorder work to make it faster. Atomics, release and acquire, sequential consistency, fences, and locks give you the guarantees you choose. Use the smallest ordering that is clearly correct when performance requires it. Prefer a simpler design when the cost has not been measured. The most reliable way to reason about concurrent code is to name who owns what. List the shared state, draw the links, and state which transitions are allowed. If the explanation relies on what the CPU probably does first, it is not a correctness argument yet.

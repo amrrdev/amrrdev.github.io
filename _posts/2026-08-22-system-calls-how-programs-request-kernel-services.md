@@ -17,35 +17,35 @@ series_order: 2
 
 ## The short version
 
-A system call is a controlled entry point through which a user-space program asks the kernel to perform a privileged operation. A useful way to picture it is as a gate between user space and the kernel. The program puts in a number and arguments, the CPU switches to privileged mode, the kernel checks permissions and the user pointers, does the work or schedules it, and returns a result or an error.
+A system call is a set way for a program to ask the kernel to do something it cannot do on its own. Think of it as a gate between the program and the kernel. The program passes in a number and some arguments. The CPU switches to a higher level of access. The kernel checks the program is allowed, checks the pointers it was given, does the work or lines it up for later, then hands back a result or an error.
 
-Opening a file, creating a process, allocating a memory mapping, or reading from a socket all go through this gate. The boundary matters because it connects ordinary backend code to protected state, and the kernel cannot trust the pointers, lengths, or file descriptors it is given. For a backend, whether a `read` returns 0, a short count, or `-1` with `EAGAIN` decides whether an HTTP handler sees end of file, needs to retry, or should apply backpressure.
+Opening a file, starting a process, mapping memory, or reading from a socket all go through this gate. The gate matters because it links ordinary code to private state inside the kernel. The kernel cannot trust the pointers, lengths, or file descriptors the program hands it. For a backend service, the result of a `read` decides what happens next. A return of 0 means the end of the data. A short count means some bytes came back. A return of `-1` with `EAGAIN` means try again later or slow down.
 
 
 
 ## Where this article fits
 
-The previous article gave the OS model overview. This article explains the *mechanism* that implements it.
+The previous article showed the big picture of how an OS works. This article explains the *mechanism* behind it: the system call.
 
-**Prerequisites:** What the Operating System Provides :  the services that need a gate.  
-**Next:** Linux Processes and Lifecycle :  the resource that uses those gates to be created.
+**Prerequisites:** What the Operating System Provides: the services that need a gate.  
+**Next:** Linux Processes and Lifecycle: the resource that uses those gates to be created.
 
-Later articles will explain the resources that system calls operate on: processes, memory, files, sockets, devices, and scheduling. This article gives us the common path they share.
+Later articles cover the things system calls work on: processes, memory, files, sockets, devices, and scheduling. This article shows the shared path they all use.
 
-> Platform note: Register details use **Linux x86-64** as example (`rax` number, `rdi/rsi/rdx/r10/r8/r9` args). ARM64 uses `x8` for number, `x0-x5` for args and `svc` instruction; macOS/Windows use different numbers. The *validated gate* idea is the same.
+> Platform note: The register details below use **Linux x86-64** as the example (number in `rax`, arguments in `rdi/rsi/rdx/r10/r8/r9`). ARM64 puts the number in `x8` and arguments in `x0-x5`, and uses the `svc` instruction. macOS and Windows use different numbers. The main idea, a gate that checks every request, is the same on all of them.
 
 ## Why a program cannot simply call the kernel's functions
 
-The kernel runs with privileges that ordinary programs do not have. It can change page tables, access device registers, schedule processes, inspect protected memory, and modify filesystem state.
+The kernel has powers that ordinary programs do not. It can change page tables, reach device hardware, decide which process runs next, read protected memory, and change files on disk.
 
-If any program could call arbitrary kernel functions or write directly to kernel memory, one buggy or malicious program could take control of the machine or corrupt every other process. The operating system therefore exposes a narrow, documented interface instead of allowing user code to call internal kernel functions directly.
+If any program could call kernel functions directly or write into kernel memory, a single buggy or hostile program could take over the machine or break every other program. So the operating system offers a small, documented set of entry points instead of letting programs call kernel internals.
 
 
-The system-call interface is a contract. It defines the operation number, argument meaning, return-value rules, error behavior, and sometimes blocking or ordering behavior.
+The system-call interface is a contract. It sets the operation number, what each argument means, how the result is returned, how errors are reported, and sometimes whether the call blocks or must happen in a certain order.
 
 ## A system call is not the same as a library function
 
-Many programs call library functions rather than writing system-call instructions directly. A library function may:
+Many programs call library functions instead of writing system-call instructions by hand. A library function may do any of these:
 
 - Call one system call
 - Combine several system calls
@@ -55,7 +55,7 @@ Many programs call library functions rather than writing system-call instruction
 - Validate arguments at the library level
 - Implement behavior entirely in user space
 
-For example, `printf` is a library function. It formats values and may buffer the result before eventually using a `write` system call. `fopen` is a C library function that parses the path and mode before using lower-level file operations. `memcpy` normally does not need a system call at all because it copies data within the process's own memory.
+For example, `printf` is a library function. It turns values into text and may hold that text in a buffer before it finally uses the `write` system call. `fopen` is a C library function that reads the path and mode before it uses lower-level file operations. `memcpy` usually needs no system call at all, because it copies data inside the program's own memory.
 
 ```text
 Application calls printf
@@ -69,22 +69,22 @@ Kernel validates the file descriptor and buffer
 Kernel writes to a file, pipe, terminal, or socket
 ```
 
-This distinction matters when counting system calls or measuring performance. A program may execute many library calls while making few system calls, or one high-level operation may cause many system calls.
+This difference matters when you count system calls or measure speed. A program may run many library calls while making few system calls. Or one high-level operation may cause many system calls.
 
 ## The general system-call path
 
-The exact implementation depends on the operating system and architecture, but the path usually looks like this:
+The exact steps depend on the operating system and the CPU, but the path usually looks like this:
 
 
-The operation may complete immediately, or the process may block while waiting for a device, file, socket, lock, timer, or another event. If it blocks, the scheduler can run another thread or process while this one waits.
+The operation may finish at once. Or the process may have to wait for a device, file, socket, lock, timer, or some other event. If it waits, the scheduler can run another thread or process in the meantime.
 
 ## The user/kernel transition
 
-The processor has privilege modes. User-mode code is restricted. Kernel-mode code can perform privileged operations and access protected kernel state.
+A processor runs in different privilege modes. Code in user mode is limited. Code in kernel mode can do privileged work and reach protected kernel state.
 
-On Linux x86-64, a user program commonly enters the kernel with the `syscall` instruction. The instruction transfers control to an address configured by the kernel and changes the processor's execution mode. Kernel entry code saves enough user state to return later and switches to a safe kernel stack.
+On Linux x86-64, a program usually enters the kernel with the `syscall` instruction. That instruction sends control to an address the kernel set up, and it changes the CPU's mode. The kernel entry code saves enough of the program's state to return later, then switches to a kernel stack that is safe to use.
 
-The transition is not the same as a normal function call. A normal call changes the instruction pointer within the current process and privilege level. A system call crosses a protection boundary, requires state handling and validation, and may interact with the scheduler or hardware.
+This change is not the same as a normal function call. A normal call stays inside the same program and the same privilege level. A system call crosses a protection line. It needs state handling and checks, and it may involve the scheduler or the hardware.
 
 On Linux x86-64, the conventional raw syscall register arrangement is:
 
@@ -99,17 +99,17 @@ On Linux x86-64, the conventional raw syscall register arrangement is:
 | Sixth argument | `r9` |
 | Return value | `rax` |
 
-The `syscall` instruction also has architecture-specific effects on registers such as `rcx` and `r11`. These details are part of the Linux x86-64 ABI and should not be copied blindly to ARM64, another operating system, or a language-level function call.
+The `syscall` instruction also changes registers such as `rcx` and `r11` in ways that depend on the CPU. These details belong to the Linux x86-64 ABI. Do not copy them straight into ARM64 code, another operating system, or a normal language function call.
 
-The important concept is not memorizing every register. It is understanding that the system-call ABI is a binary contract between user-space code and the kernel.
+The key point is not to memorize every register. It is to understand that the system-call ABI is a fixed contract between user-space code and the kernel.
 
 ## System-call numbers
 
-The kernel needs to know which operation the program is requesting. A system-call number identifies the operation in the ABI.
+The kernel needs to know which operation the program wants. A system-call number names that operation in the ABI.
 
-For example, Linux assigns numbers to operations such as `read`, `write`, `openat`, `mmap`, and `exit`. The numbers are architecture-specific. The number for a syscall on x86-64 may not be the same on another architecture.
+For example, Linux gives numbers to operations such as `read`, `write`, `openat`, `mmap`, and `exit`. The numbers depend on the CPU architecture. The number for a call on x86-64 may differ on another architecture.
 
-Libraries and language runtimes normally hide these numbers behind names. Direct code that places a number into a register is tightly coupled to a specific operating system and architecture.
+Libraries and language runtimes usually hide these numbers behind names. Code that puts a number straight into a register is tied closely to one operating system and one CPU family.
 
 ```text
 System-call number + arguments
@@ -119,60 +119,60 @@ Kernel dispatch table
 Implementation for that operation
 ```
 
-The dispatch table is an internal kernel mechanism that maps the requested number to the appropriate handler. A user program should normally use the documented library or syscall interface rather than depending on kernel-internal function addresses.
+The dispatch table is an internal kernel mechanism. It maps the requested number to the right handler. A program should normally use the documented library or syscall interface instead of relying on kernel-internal addresses.
 
 ## Arguments cross a trust boundary
 
-System-call arguments come from user space, so the kernel must treat them as untrusted input. This includes integers, file descriptors, flags, pointers, lengths, paths, structures, and arrays.
+System-call arguments come from the program, so the kernel must treat them as input it cannot trust. These arguments include numbers, file descriptors, flags, pointers, lengths, paths, structures, and arrays.
 
-Consider a call that asks the kernel to read data into a user-provided buffer. The kernel must determine whether:
+Here is a simple case. The program asks the kernel to read some data into a buffer the program owns. Before that read happens, the kernel has to confirm a few things:
 
-- The pointer refers to an address in the process's allowed address space
-- The requested length is valid
-- The memory is writable by the process
-- The range is large enough for the operation
-- The file descriptor refers to a valid readable object
-- The operation is permitted for the process's identity
+- The buffer sits inside the program's own memory
+- The length is a sensible number
+- That memory can actually be written to
+- The buffer is large enough for the operation
+- The file descriptor points to something real and readable
+- The program is allowed to do this at all
 
-The kernel cannot simply dereference the pointer as if it were kernel memory. It uses safe access mechanisms to copy data between user and kernel memory or to validate a mapping before accessing it.
+The kernel does not just follow the pointer the way an ordinary function would. It copies the data in carefully, or it checks the memory first. That way, a bad pointer cannot crash the machine or let one program read another's private data.
 
 
-A malicious program may pass an invalid pointer intentionally. A normal program may pass one accidentally because of a bug. The kernel must handle both cases without crashing or exposing protected data.
+A hostile program may pass a bad pointer on purpose. A normal program may pass one by accident because of a bug. The kernel must handle both cases. It must not crash, and it must not leak protected data.
 
 ## Pointers can change while the kernel works
 
-A pointer is not a permanent promise that the memory will remain unchanged. A multithreaded program may modify memory while another thread is making a system call. A signal handler or another operation may change state. A page may become unavailable or have its permissions changed.
+A pointer is not a permanent promise that the memory will stay the same. A program with many threads may change memory while another thread is mid-call. A signal handler or another operation may alter the state. A memory page may become unavailable or have its permissions changed.
 
-The kernel must structure its access carefully. It may copy data into kernel-owned memory before using it, validate again at the point of access, or use synchronization that prevents unsafe changes.
+The kernel must handle its access with care. It may copy the data into kernel-owned memory before using it. It may check again right before it touches the memory. Or it may use locking that stops unsafe changes.
 
-This is one reason system-call interfaces use explicit sizes and carefully defined structures. The kernel needs to know how much data it may read or write and how to handle changes safely.
+This is one reason system-call interfaces use exact sizes and clearly defined structures. The kernel needs to know how much data it may read or write, and how to handle changes safely.
 
 ## Return values and errors
 
-A system call returns a value that describes success or failure. The meaning depends on the particular call.
+A system call returns a value that tells you whether it worked. What that value means depends on the call.
 
 For `read`:
 
 - A positive value means that many bytes were read.
-- `0` means end-of-file for a regular file or an orderly stream close for many sockets.
+- `0` means the end of the data for a file, or an orderly close for many sockets.
 - `-1` from the C library wrapper indicates an error, with details available through `errno`.
 
 For `write`:
 
-- A positive value means that many bytes were accepted, which may be less than requested.
+- A positive value means that many bytes were accepted. It may be fewer than you asked for.
 - `-1` indicates an error through the library interface.
 
-For process creation, the return value may identify the child or distinguish parent and child execution. For `mmap`, the return value is an address on success or a failure indication. The contract is specific to each call.
+For process creation, the return value may tell you which child was made or whether you are the parent or the child. For `mmap`, the return value is an address on success, or a sign of failure. The details are specific to each call.
 
-The raw kernel convention and the C library convention are related but not identical. On Linux, a raw syscall commonly returns a negative error number in the range reserved for errors. The C library wrapper converts that into `-1` and stores the positive error number in `errno`.
+The raw kernel rule and the C library rule are close but not the same. On Linux, a raw syscall often returns a negative number from the error range. The C library wrapper turns that into `-1` and puts the positive error number into `errno`.
 
-Applications should use the documented wrapper or language API unless they have a specific reason to call the raw syscall interface.
+Programs should use the documented wrapper or language API unless they have a clear reason to call the raw syscall interface.
 
 ## `read` and `write` are not guaranteed to process everything
 
-A common beginner mistake is assuming that one `read` fills the entire requested buffer or one `write` sends all requested bytes.
+A common beginner mistake is to assume that one `read` fills the whole buffer you asked for, or that one `write` sends every byte you requested.
 
-The kernel may return a short result because only some data is available, a pipe or socket has limited space, a signal interrupted the operation, or the underlying object has a boundary or limit.
+The kernel may return a short result. Only some data may be ready. A pipe or socket may have little free space. A signal may have interrupted the call. Or the object may have a built-in boundary or limit.
 
 ```c
 ssize_t total = 0;
@@ -197,31 +197,31 @@ while (total < wanted) {
 }
 ```
 
-This loop is only an example. Non-blocking descriptors, cancellation, deadlines, and application-level message framing require additional decisions. The important lesson is that the return value describes what happened, not what the caller hoped would happen.
+This loop is only an example. Non-blocking descriptors, cancellation, deadlines, and message framing at the application level all need more decisions. The key lesson is that the return value tells you what actually happened, not what the caller hoped would happen.
 
 ## Blocking system calls
 
-A blocking operation waits until it can make progress or until it fails. A blocking `read` may wait for data. A blocking `write` may wait for buffer space. A blocking `accept` may wait for a new connection. A blocking lock operation may wait for ownership.
+A blocking operation waits until it can move forward or until it fails. A blocking `read` may wait for data. A blocking `write` may wait for free buffer space. A blocking `accept` may wait for a new connection. A blocking lock may wait for ownership.
 
-When a thread blocks, the operating system can mark it as waiting and schedule other runnable work. Blocking is not automatically inefficient. It can be a simple and effective model when the number of concurrent operations is manageable.
+When a thread blocks, the operating system marks it as waiting and runs other work instead. Blocking is not automatically wasteful. It can be a simple and effective model when the program handles a manageable number of operations at once.
 
-The problem appears when a system holds too many resources while waiting. A request thread that waits for a slow dependency may keep memory, a connection, a transaction, and a queue slot. Enough blocked requests can exhaust the service even when CPU usage is low.
+The trouble starts when a system holds too many resources while it waits. A request thread that waits on a slow dependency may hold onto memory, a connection, a transaction, and a queue slot. Enough blocked requests can exhaust the service even when the CPU is mostly idle.
 
 Later networking articles will compare blocking, non-blocking, and event-driven I/O.
 
 ## Interrupted system calls
 
-A signal can interrupt a system call while it is waiting. Depending on the operation and signal behavior, the call may return an error such as `EINTR`, or it may be automatically restarted by the library or kernel configuration.
+A signal can interrupt a system call while it waits. Depending on the call and how signals are set up, it may return an error such as `EINTR`, or it may be restarted automatically by the library or the kernel.
 
-Code must follow the contract for the specific call. Blindly retrying every interrupted operation can be wrong if the operation has side effects or if the caller's deadline has expired.
+Your code must follow the contract for the specific call. Retrying every interrupted operation without thought can be wrong if the call had side effects or if your deadline already passed.
 
-For a read that has not produced data, retrying may be reasonable. For an operation that may have partially completed, the program must inspect the result and avoid duplicating effects.
+If a read has produced no data yet, retrying may be fine. But if an operation may have partly finished, the program must check the result and avoid doing the work twice.
 
-This is another example of why errors are part of the interface. A return value does not only say “success” or “failure”; it may describe how far the operation progressed.
+This is another reason errors are part of the interface. A return value does not only say success or failure. It may tell you how far the operation got.
 
 ## A concrete example: `write`
 
-Suppose a program wants to write text to standard output.
+Suppose a program wants to write some text to standard output.
 
 At the application level, it may call:
 
@@ -236,48 +236,48 @@ The program supplies:
 - A pointer to the bytes
 - The number of bytes it wants to write
 
-The library or compiler exposes the call according to the platform's ABI. The kernel checks the descriptor, validates that the user buffer can be read, and routes the data to the object behind the descriptor. That object could be a terminal, pipe, regular file, socket, or redirected output.
+The library or compiler exposes the call using the platform's ABI. The kernel checks the descriptor, confirms that the program's buffer can be read, and sends the data to the object behind the descriptor. That object could be a terminal, a pipe, a regular file, a socket, or redirected output.
 
-The system call does not need to know that the application thinks of the destination as “the screen.” It operates on the kernel-managed object represented by the descriptor.
+The system call does not need to know that the program thinks of the destination as the screen. It works on the object the descriptor points to, which the kernel manages.
 
 ## File descriptors are capabilities within a process
 
-A file descriptor is a small process-local handle referring to a kernel-managed open object. It may refer to a file, socket, pipe, device, or another resource with a file-like interface.
+A file descriptor is a small number that belongs to one process. It refers to an open object that the kernel manages. That object may be a file, socket, pipe, device, or another resource that behaves like a file.
 
-The descriptor is meaningful in the process that owns it. Another process cannot use the same integer as if it automatically referred to the same object. Descriptors can be inherited across process creation, duplicated, or passed to another process through a special IPC mechanism.
+The descriptor only means something inside the process that owns it. Another process cannot use the same number and expect it to point to the same object. Descriptors can pass to child processes when they are created, be copied, or be sent to another process through a special IPC mechanism.
 
 
-This model explains why closing a descriptor changes what later operations can do and why descriptor leaks eventually cause new system calls to fail.
+This model explains two things. Closing a descriptor changes what later operations can do. And if a program leaks descriptors, it will eventually run out and new system calls will fail.
 
 ## Common system-call families
 
-System calls are often grouped by the resource or service they manage.
+System calls are usually grouped by the resource they manage.
 
 ### Process and thread operations
 
-These include creating, replacing, waiting for, and terminating execution. Linux calls such as `clone`, `fork`, `execve`, `wait4`, and `exit` participate in process lifecycle behavior.
+These cover creating, replacing, waiting for, and ending execution. On Linux, calls such as `clone`, `fork`, `execve`, `wait4`, and `exit` handle the process lifecycle.
 
 ### File and filesystem operations
 
-These include opening paths, reading, writing, seeking, syncing, changing metadata, creating directories, and removing names. Examples include `openat`, `read`, `write`, `lseek`, `fsync`, `stat`, and `rename`.
+These cover opening paths, reading, writing, seeking, syncing, changing metadata, making directories, and removing names. Examples include `openat`, `read`, `write`, `lseek`, `fsync`, `stat`, and `rename`.
 
 ### Memory operations
 
-These include creating mappings, changing permissions, unmapping regions, and advising the kernel about memory usage. Examples include `mmap`, `munmap`, `mprotect`, and `madvise`.
+These cover creating mappings, changing permissions, removing mappings, and telling the kernel how you plan to use memory. Examples include `mmap`, `munmap`, `mprotect`, and `madvise`.
 
 ### Networking operations
 
-These include creating sockets, binding addresses, listening, accepting connections, connecting, sending, receiving, and changing socket options. Some systems expose separate calls; others combine operations through interfaces such as `socketcall` or related APIs.
+These cover creating sockets, binding addresses, listening, accepting connections, connecting, sending, receiving, and changing socket options. Some systems use separate calls. Others combine them through interfaces such as `socketcall` or related APIs.
 
 ### Information and synchronization
 
-These include reading clocks, waiting for events, changing scheduling properties, locking, and querying process or resource state.
+These cover reading clocks, waiting for events, changing scheduling settings, locking, and asking about process or resource state.
 
-The names and exact interfaces vary by operating system. The common pattern is a request to the kernel for a protected service.
+The names and exact interfaces differ across operating systems. The shared pattern is always a request to the kernel for a protected service.
 
 ## Observing system calls with `strace`
 
-`strace` traces system calls made by a process on Linux. It can show the call name, arguments, return value, and timing information.
+`strace` records the system calls a process makes on Linux. It can show the call name, its arguments, the return value, and timing information.
 
 For a simple program:
 
@@ -295,7 +295,7 @@ write(1, "hello\n", 6)                   = 6
 exit_group(0)                             = ?
 ```
 
-The exact output depends on the program and system. The trace shows several important facts:
+The real output depends on the program and system. The trace still shows several useful facts:
 
 - The library opened a path and received descriptor 3.
 - The process read 6 bytes from that descriptor.
@@ -303,15 +303,15 @@ The exact output depends on the program and system. The trace shows several impo
 - It wrote 6 bytes to descriptor 1, standard output.
 - The process exited.
 
-Tracing is useful because it reveals what a program actually asks the kernel to do. It can show unexpected file access, repeated operations, blocking calls, permission errors, and descriptor leaks.
+Tracing helps because it shows what a program really asks the kernel to do. It can reveal unexpected file access, repeated operations, blocking calls, permission errors, and descriptor leaks.
 
-It also has overhead and may expose sensitive arguments. It should be used carefully in production.
+It also adds overhead and may show sensitive arguments. Use it with care in production.
 
 ## System-call cost
 
-A system call costs more than a normal in-process function call because it crosses a privilege boundary, saves and restores state, validates arguments, and may interact with kernel data structures or devices.
+A system call costs more than a normal in-process function call. It crosses a privilege boundary, saves and restores state, checks arguments, and may touch kernel data structures or devices.
 
-The cost depends on the operation. A call that returns from a cache may be much cheaper than one that waits for storage. A system call that blocks can involve scheduling and wake-up work. A call that transfers a large buffer may spend most of its time copying data rather than entering the kernel.
+The cost depends on the operation. A call that returns from a cache may be far cheaper than one that waits for storage. A call that blocks can involve scheduling and wake-up work. A call that moves a large buffer may spend most of its time copying data rather than entering the kernel.
 
 Reducing system-call count can help when calls are small and frequent. Common techniques include:
 
@@ -323,21 +323,21 @@ Reducing system-call count can help when calls are small and frequent. Common te
 - Using memory mappings where appropriate
 - Using event-driven interfaces for many sockets
 
-Fewer system calls are not always better. A large batch may increase latency or memory use. A memory mapping may make access convenient but introduce page faults and difficult lifetime behavior. The optimization must fit the workload.
+Fewer system calls are not always better. A large batch may raise latency or memory use. A memory mapping may make access easy but bring page faults and tricky lifetime rules. The optimization must fit the workload.
 
 ## A system call does not always mean a context switch
 
-People often say that every system call causes a context switch. That is not precise.
+People often say that every system call causes a context switch. That is not quite right.
 
-A system call does cause a transition from user mode to kernel mode and back. A context switch usually means changing the currently running thread or process, including saving one execution context and restoring another.
+A system call does move the CPU from user mode to kernel mode and back. A context switch usually means changing which thread or process is running. That means saving one execution context and restoring another.
 
-If a system call completes immediately, the same thread may enter the kernel and return without another thread running. If the call blocks, the scheduler may switch to another runnable thread or process. The two concepts are related but different.
+If a system call finishes at once, the same thread may enter the kernel and return without another thread running. If the call blocks, the scheduler may switch to another thread or process that can run. The two ideas are related but different.
 
-This distinction matters when measuring performance. Privilege-transition cost and scheduling cost are separate parts of the path.
+This difference matters when you measure performance. The cost of crossing the privilege boundary and the cost of scheduling are separate parts of the path.
 
 ## Security at the system-call boundary
 
-The system-call interface is a security boundary because it gives user-space code access to operations that affect shared or privileged state.
+The system-call interface is a security boundary because it lets user-space code reach operations that change shared or privileged state.
 
 The kernel must check:
 
@@ -351,13 +351,13 @@ The kernel must check:
 - Namespace or sandbox restrictions
 - Whether the operation is allowed in the current context
 
-A bug in argument validation can be more serious than an application crash because it may allow a user program to read protected data, corrupt kernel state, or gain privileges.
+A bug in argument checking can be worse than an app crash. It may let a user program read protected data, corrupt kernel state, or gain more privileges than it should have.
 
-System-call filtering tools such as seccomp can restrict which calls a process may make. Sandboxes and containers use several mechanisms together to limit what a process can see and do. These topics will be covered in the security and container stages.
+System-call filtering tools such as seccomp can limit which calls a process may make. Sandboxes and containers use several mechanisms together to limit what a process can see and do. Later security and container articles cover these topics.
 
 ## A realistic production example
 
-Imagine a service that has low CPU usage but cannot keep up with incoming requests. Tracing shows that each request opens several files, performs many small reads, and repeatedly asks the kernel for status information. The storage device is not fully saturated, but the process spends time making system calls and waiting for small operations.
+Imagine a service with low CPU usage that still cannot keep up with incoming requests. Tracing shows that each request opens several files, does many small reads, and asks the kernel for status information again and again. The storage device is not full, but the process spends its time making system calls and waiting on small operations.
 
 The team considers several changes:
 
@@ -367,9 +367,9 @@ The team considers several changes:
 4. Batch status checks.
 5. Measure whether the workload is actually storage-bound or syscall-overhead-bound.
 
-After batching, CPU usage may increase slightly because more data is processed per operation, while request latency and throughput improve. The team still needs limits so buffering does not create unbounded memory usage.
+After batching, CPU usage may rise a little because each operation does more work. But request latency drops and throughput improves. The team still needs limits, so buffering does not grow memory without bound.
 
-The important lesson is not “always reduce syscalls.” It is that system-call traces can reveal the real interaction between application code and the kernel, and that the correct optimization depends on the operation's resource behavior.
+The key lesson is not to always reduce syscalls. It is that system-call traces reveal how application code really talks to the kernel, and the right fix depends on how the operation uses resources.
 
 ## How experienced engineers reason about system calls
 
@@ -386,133 +386,133 @@ When an operation behaves unexpectedly, experienced engineers ask:
 - Does it affect persistent or external state?
 - Is the behavior portable or platform-specific?
 
-They use the highest-level explanation that remains accurate, then inspect lower layers when the abstraction no longer explains the result. `strace`, a debugger, metrics, logs, and source code can each answer different parts of the question.
+They start with the simplest explanation that still fits the facts. Then they look at lower layers when the high-level view no longer explains the result. `strace`, a debugger, metrics, logs, and source code each answer a different part of the question.
 
 ## The virtual dynamic shared object lets some calls skip the trap
 
-The kernel maps a small read-only page of code into every process, called the vDSO, or virtual dynamic shared object. For operations such as `clock_gettime` and `gettimeofday`, the kernel keeps the current time in a memory location that user space can read directly. The wrapper can then compute the answer without ever executing a syscall instruction or entering privileged mode.
+The kernel maps a small read-only page of code into every process. This page is called the vDSO, short for virtual dynamic shared object. For operations such as `clock_gettime` and `gettimeofday`, the kernel keeps the current time in a memory spot that user space can read directly. The wrapper can then work out the answer without running a syscall instruction or entering privileged mode.
 
-This matters because timing calls are extremely frequent. A busy server may ask for the time on every request to stamp logs or enforce deadlines. If each of those calls trapped to the kernel, the cost would dominate small operations. The vDSO turns a potential trap into an ordinary memory read plus a little arithmetic, which is often hundreds of times faster.
+This matters because time calls happen very often. A busy server may ask for the time on every request to label logs or enforce deadlines. If each of those calls trapped to the kernel, the cost would outweigh the small work being done. The vDSO turns a possible trap into a plain memory read plus a little math. That is often hundreds of times faster.
 
-Not every call can use this path. Only operations whose answer the kernel can safely publish to user space without further validation or side effects belong in the vDSO. Anything that changes state, touches a device, or depends on identity still needs the real gate.
+Not every call can use this path. Only operations whose answer the kernel can safely share with user space, with no extra checks and no side effects, belong in the vDSO. Anything that changes state, touches a device, or depends on who you are still needs the real gate.
 
 ## io_uring offers an asynchronous alternative to the synchronous gate
 
-Most of this article describes the synchronous model: you issue one call, and it returns when the kernel has an answer, possibly after blocking. io_uring is a Linux interface that changes the shape of the interaction. Instead of trapping per operation, the program and kernel share two ring buffers in memory, a submission queue and a completion queue. The application places requests into the submission ring and later harvests completions from the completion ring, communicating through ordinary memory rather than a syscall for each step.
+Most of this article describes the synchronous model: you make one call, and it returns when the kernel has an answer, possibly after blocking. io_uring is a Linux interface that changes how the interaction works. Instead of trapping for each operation, the program and kernel share two ring buffers in memory: a submission queue and a completion queue. The program puts requests into the submission ring, then later collects the finished ones from the completion ring. They talk through ordinary memory instead of a syscall for every step.
 
-The benefit appears when a workload makes many I/O operations and does not want to pay a transition per request or juggle many threads or an event loop with epoll. A single `io_uring_enter` call can submit dozens of operations and reap completions, which collapses the per-operation boundary cost. It also supports true asynchronous operations such as buffered reads that would otherwise block.
+The benefit shows up when a workload makes many I/O operations and does not want to pay a transition for each one, or run many threads, or run an event loop with epoll. A single `io_uring_enter` call can submit dozens of operations and collect their completions. That collapses the cost of crossing the boundary per operation. It also supports true async operations, such as buffered reads that would otherwise block.
 
-io_uring is not free and is not always the right tool. The shared rings add setup, memory, and kernel-version dependencies, and early implementations had a larger attack surface. Use it when syscall frequency or blocking behavior is the actual bottleneck, not as a default for every program.
+io_uring is not free and is not always the right tool. The shared rings add setup, memory, and kernel-version dependencies, and early versions had a larger attack surface. Use it when syscall frequency or blocking is the real bottleneck, not as a default for every program.
 
 ## The cost of crossing the boundary is more than the instruction itself
 
-The instruction to enter the kernel is cheap in isolation, but the surrounding work is what you pay for. The CPU must switch privilege mode, save the user registers it will clobber, and establish a kernel stack. On return it restores state and switches back. None of that is free compared to a plain function call that stays in the same context.
+The instruction to enter the kernel is cheap on its own, but the work around it is what costs you. The CPU must switch privilege mode, save the user registers it will overwrite, and set up a kernel stack. On return it restores state and switches back. None of that is free next to a plain function call that stays in the same context.
 
-Beyond the register and mode work, the transition disturbs the hardware caches and translation lookaside buffer. Kernel code touches different memory than your function did, so entering the kernel can evict cache lines your application wanted, and the TLB entries that map user pages may be less warm when you return. For very small, frequent calls the data movement and cache effects can outweigh the instruction itself.
+Beyond the register and mode work, the switch disturbs the hardware caches and the translation lookaside buffer. Kernel code touches different memory than your function did. So entering the kernel can push out cache lines your program wanted, and the TLB entries that map your pages may be cold when you return. For very small, frequent calls, the data movement and cache effects can cost more than the instruction itself.
 
 This is why batching helps. When one larger read or write replaces many small ones, you pay the transition a few times instead of thousands, and you keep more of your working set in cache between calls.
 
 ## seccomp filters the gate before the kernel validates arguments
 
-seccomp is a kernel feature that filters which system calls a process may make. The important detail for a systems engineer is where it sits in the path. A seccomp filter runs when the syscall number is known but before the kernel's normal argument validation and handler execute, and it can reject the call based on the number and even on specific argument values.
+seccomp is a kernel feature that filters which system calls a process may make. The detail that matters for a systems engineer is where it sits in the path. A seccomp filter runs once the syscall number is known, but before the kernel's normal argument checks and handler. It can reject the call based on the number and even on specific argument values.
 
-The value is containment. A web server that only needs to read files, accept connections, and write logs can be given a policy that blocks everything else, including calls that might be used in an exploit. If an attacker finds a memory bug and tries to call a dangerous operation, the filter denies it at the gate rather than letting the kernel's validation logic decide.
+The value is containment. A web server that only needs to read files, accept connections, and write logs can get a policy that blocks everything else, including calls that might appear in an exploit. If an attacker finds a memory bug and tries a dangerous operation, the filter denies it at the gate instead of letting the kernel's checks decide.
 
-seccomp is one layer, not a complete sandbox. It restricts the interface but does not by itself limit filesystem paths, network destinations, or resource use. Production sandboxes combine it with namespaces, capabilities, and resource limits, which later security articles cover in more detail.
+seccomp is one layer, not a full sandbox. It limits the interface but does not by itself restrict filesystem paths, network destinations, or resource use. Production sandboxes combine it with namespaces, capabilities, and resource limits. Later security articles cover these in more detail.
 
 ## Tracing with strace has a cost that perf trace can reduce
 
-The strace section earlier showed how useful a trace is for seeing what a program asks of the kernel. What it did not stress is the cost. strace works by asking the kernel to stop the process on every syscall entry and exit so the tracer can inspect it. That forced stop and context interaction can slow a program by an order of magnitude or more, and it changes timing enough that it can hide or invent races.
+The strace section earlier showed how useful a trace is for seeing what a program asks of the kernel. What it did not stress is the cost. strace works by asking the kernel to stop the process on every syscall entry and exit so the tracer can look at it. That forced stop and the context interaction can slow a program by ten times or more. It also changes timing enough to hide or create races.
 
-For lighter observation, perf trace uses the kernel's tracing infrastructure to record syscalls with far less intrusion. It samples and reports without stopping the target on every call, so it is better suited to production-adjacent measurement where you need aggregate counts and latency rather than a precise per-call argument dump. The lesson is the same as with all profiling: use the heaviest tool only when you need its detail, and reach for the lighter one when you only need the shape.
+For lighter observation, perf trace uses the kernel's tracing system to record syscalls with far less interference. It samples and reports without stopping the target on every call. So it fits better in production-adjacent measurement, where you need totals and latency rather than a precise per-call argument dump. The lesson is the same as with all profiling: use the heaviest tool only when you need its detail, and reach for the lighter one when you only need the overall shape.
 
 ## Interview definitions
 
 ### What is a system call?
 
-> A system call is a controlled entry point that lets a user-space program request a service from the privileged operating-system kernel.
+> A system call is a controlled entry point that lets a program ask the privileged kernel to do a service for it.
 
 ### Why are system calls needed?
 
-> Programs need system calls to perform operations that require kernel-managed resources or privileges, such as accessing files, creating processes, using sockets, and managing memory mappings.
+> Programs need system calls to do things that need kernel-managed resources or privileges, such as reading files, creating processes, using sockets, and managing memory mappings.
 
 ### What happens during a system call?
 
-> The program prepares a syscall number and arguments, enters the kernel through a protected CPU transition, and the kernel validates the request, performs or schedules the operation, and returns a result or error.
+> The program sets up a syscall number and arguments, enters the kernel through a protected CPU transition, and the kernel checks the request, does the work or lines it up for later, then returns a result or an error.
 
 ### What is the difference between a system call and a library call?
 
-> A library call stays in user space unless it chooses to enter the kernel. A system call crosses into the privileged kernel. A library function may wrap one system call, combine several, add buffering, or perform its work entirely in user space.
+> A library call stays in user space unless it decides to enter the kernel. A system call crosses into the privileged kernel. A library function may wrap one system call, combine several, add buffering, or do its work entirely in user space.
 
 ### Why does the kernel validate user pointers?
 
-> User pointers may be invalid, point outside the process, have the wrong permissions, or be deliberately malicious. Validation prevents crashes, memory corruption, and unauthorized access to kernel state.
+> User pointers may be invalid, point outside the process, have the wrong permissions, or be set up on purpose to do harm. Checking them prevents crashes, memory corruption, and unauthorized access to kernel state.
 
 ### What is a short read or short write?
 
-> A short read or write is a successful operation that transfers fewer bytes than requested. The caller must use the returned count and continue or finish according to the operation's contract.
+> A short read or write is a successful operation that moves fewer bytes than you asked for. The caller must use the returned count and continue or finish following the operation's contract.
 
 ## Interview follow-up questions
 
 ### Does every system call cause a context switch?
 
-> Every system call crosses from user mode to kernel mode, but it does not necessarily switch to another thread or process. A context switch may happen if the call blocks or the scheduler makes another decision.
+> Every system call crosses from user mode to kernel mode, but it does not necessarily switch to another thread or process. A context switch may happen if the call blocks or the scheduler picks something else.
 
 ### Why can a system call block?
 
-> It can block when the requested resource is not ready, such as data not yet arriving on a socket, space not being available in a buffer, a lock being held, or storage I/O still being in progress.
+> It can block when the resource it needs is not ready. Data may not have arrived on a socket yet. Buffer space may not be free. A lock may be held by someone else. Or storage I/O may still be running.
 
 ### How does `errno` work?
 
-> In the common C library interface, a failing wrapper returns `-1` and stores an error number in thread-local `errno`. The caller must inspect it according to the specific call's contract and should not assume every error is retryable.
+> In the common C library interface, a failing wrapper returns `-1` and stores an error number in thread-local `errno`. The caller must check it following the specific call's contract and should not assume every error can be retried.
 
 ### Why can `read` return fewer bytes than requested?
 
-> The available data may be smaller than the requested amount, the source may reach end-of-file, a stream may deliver data incrementally, or an interruption may occur. The return value tells the caller how much was actually transferred.
+> The available data may be smaller than you asked for, the source may reach end-of-file, a stream may deliver data in pieces, or an interruption may occur. The return value tells the caller how much actually moved.
 
 ### How would you reduce system-call overhead?
 
-> I would first measure the call pattern. Depending on the workload, I might buffer or batch small operations, reuse descriptors, use vector I/O, reduce unnecessary metadata calls, or choose an appropriate event-driven interface. I would verify that the change does not increase memory, latency, or failure complexity.
+> I would first measure the call pattern. Depending on the workload, I might buffer or batch small operations, reuse descriptors, use vector I/O, cut unnecessary metadata calls, or pick a fitting event-driven interface. I would check that the change does not raise memory use, latency, or failure complexity.
 
 ### Why is the system-call boundary important for security?
 
-> It is where untrusted user-space input becomes a request to modify protected or shared state. The kernel must validate arguments, identity, permissions, and resource limits before performing the operation.
+> It is where untrusted user-space input turns into a request to change protected or shared state. The kernel must check arguments, identity, permissions, and resource limits before it does the operation.
 
 ## Common misconceptions
 
 ### “Every library function is a system call.”
 
-Many library functions are entirely user-space operations. Others call the kernel only when needed or buffer multiple application operations into fewer system calls.
+Many library functions run entirely in user space. Others call the kernel only when they must, or they group several application operations into fewer system calls.
 
 ### “A successful system call completed all requested work.”
 
-Some calls return partial progress. A successful return may mean that only part of a buffer was read or written, or that an operation was accepted for later processing.
+Some calls return partial progress. A successful return may mean only part of a buffer was read or written, or that an operation was accepted to be finished later.
 
 ### “A system call is just a slow function call.”
 
-A system call crosses a privilege boundary, requires validation, and may interact with kernel state, devices, scheduling, and blocking behavior. Its cost and semantics are different from an ordinary function call.
+A system call crosses a privilege boundary, requires checks, and may touch kernel state, devices, scheduling, and blocking behavior. Its cost and meaning are different from an ordinary function call.
 
 ### “The kernel can trust pointers from a process.”
 
-Pointers and lengths come from user space and must be treated as untrusted input. They may be invalid or intentionally crafted.
+Pointers and lengths come from user space and must be treated as input the kernel cannot trust. They may be invalid or built on purpose to do harm.
 
 ### “If a call timed out, the operation did not happen.”
 
-A timeout tells the caller that no result arrived before the deadline. The operation may still have completed remotely or may continue after the caller stops waiting.
+A timeout tells the caller that no result arrived before the deadline. The operation may still have finished on the remote side, or it may keep running after the caller stops waiting.
 
 ## Summary
 
-A system call is the protected path from user-space code to kernel-managed services. The program supplies a syscall number and arguments, the processor enters privileged kernel code, and the kernel validates, performs, or schedules the operation before returning a result.
+A system call is the protected path from user-space code to kernel-managed services. The program supplies a syscall number and arguments, the processor enters privileged kernel code, and the kernel checks, performs, or schedules the operation before returning a result.
 
-System calls have precise contracts around arguments, pointers, lengths, return values, partial progress, blocking, interruption, and errors. The C library or language runtime may wrap those calls with buffering, conversion, retries, or higher-level behavior.
+System calls have precise contracts about arguments, pointers, lengths, return values, partial progress, blocking, interruption, and errors. The C library or language runtime may wrap those calls with buffering, conversion, retries, or higher-level behavior.
 
-The system-call boundary is both a performance boundary and a security boundary. It can introduce transition and validation costs, and it must prevent untrusted programs from corrupting protected state. Understanding the boundary makes tools such as `strace` much more useful and prepares us to study processes, files, memory, networking, and devices in detail.
+The system-call boundary is both a performance boundary and a security boundary. It can add transition and checking costs, and it must stop untrusted programs from corrupting protected state. Understanding the boundary makes tools such as `strace` far more useful, and it prepares us to study processes, files, memory, networking, and devices in detail.
 
 ## If you want to build this later
 
 Build a small Linux system-call observability tool.
 
-Start with a program that opens a file, reads it in chunks, writes the data to standard output, and closes the file. Trace it with `strace` and compare the source-level operations with the actual calls. Then add buffering, change the chunk size, introduce an error path, and observe how the trace changes.
+Start with a program that opens a file, reads it in chunks, writes the data to standard output, and closes the file. Trace it with `strace` and compare the operations you wrote with the actual calls. Then add buffering, change the chunk size, add an error path, and watch how the trace changes.
 
 The goal is to see the difference between library code and kernel requests, understand return values and cleanup, and connect system-call count with performance and resource behavior.
 

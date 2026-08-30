@@ -10,19 +10,19 @@ stage_order: 1
 series_order: 5
 ---
 
-This is the fifth chapter in the Systems Programming Foundations arc. The earlier chapters introduced the resources a system uses, what it means to own or borrow them, and what happens when they fail or run out. This chapter looks at the other side of the same coin: how those resources turn into limits on speed and capacity.
+This is the fifth chapter in the Systems Programming Foundations arc. The earlier chapters showed the resources a system uses, how it owns or borrows them, and what happens when they run out. This chapter looks at the other side of that idea: how those same resources become limits on speed and capacity.
 
-Performance is the part of systems work that feels the most empirical. You can reason about it all day, but in the end the only honest answers come from measuring the actual workload on the actual machine. The good news is that the reasoning has a shape, and once you know the shape, the measurements start to tell a story instead of just producing numbers.
+Performance is the part of systems work that is hardest to guess. You can reason about it all day, but the only honest answers come from measuring the real workload on the real machine. The good news is that the reasoning follows a pattern. Once you know the pattern, the measurements start to tell a story instead of just giving you numbers.
 
-This chapter is about that shape. We look at what latency and throughput really describe, why an average can lie, where the critical path sits, how queues and saturation build up, and how to choose an optimization that earns its complexity.
+This chapter is about that pattern. We look at what latency and throughput really mean, why an average can lie, where the critical path sits, how queues and saturation build up, and how to pick an optimization that is worth its added complexity.
 
 ## Performance is several numbers, not one
 
-Performance is not a single value. It describes how quickly a system responds, how much work it completes, how many resources it consumes, and how its behavior changes as the workload grows.
+Performance is not a single value. It describes how quickly a system responds, how much work it completes, how many resources it uses, and how its behavior changes as the workload grows.
 
-The two measures that matter most are latency and throughput. Latency is how long one operation takes. Throughput is how much work the system completes in a span of time. A system can have high throughput and still give individual requests poor latency. It can also have excellent latency for a small workload and then collapse once more users arrive.
+The two measures that matter most are latency and throughput. Latency is how long one operation takes. Throughput is how much work the system completes in a span of time. A system can have high throughput and still give each request poor latency. It can also have excellent latency for a small workload and then collapse once more users arrive.
 
-Good performance engineering starts with a requirement and with evidence. The engineer names what the users or the dependent systems need, measures where time and resources are actually being spent, finds the bottleneck, and chooses a change whose cost is justified by the improvement it brings.
+Good performance work starts with a requirement and with evidence. The engineer states what the users or the dependent systems need, measures where time and resources are actually spent, finds the bottleneck, and chooses a change whose cost is paid for by the improvement it brings.
 
 The rule worth keeping in mind is:
 
@@ -30,21 +30,21 @@ The rule worth keeping in mind is:
 
 ## Start from a requirement, not a wish
 
-A statement like make it faster is not precise enough to guide engineering work. Faster for which operation, under what load, and measured in what way?
+A statement like "make it faster" is not precise enough to guide engineering work. Faster for which operation, under what load, and measured how?
 
 A useful performance requirement names the workload, the measurement, and the target.
 
 For example:
 
-> Under five hundred requests per second, the search endpoint should respond in less than two hundred milliseconds for 99 percent of requests, while keeping the service below 70 percent CPU utilization.
+> Under five hundred requests per second, the search endpoint should respond in less than two hundred milliseconds for 99 percent of requests, while keeping the service below 70 percent CPU use.
 
-That one sentence carries several ideas at once. It sets the traffic level, the endpoint, the latency target, the percentile, and a resource constraint. A different system might care more about processing a large batch overnight, in which case total completion time and throughput matter more than the latency of any single item.
+That one sentence carries several ideas at once. It sets the traffic level, the endpoint, the latency target, the percentile, and a resource limit. A different system might care more about processing a large batch overnight. In that case, total completion time and throughput matter more than the latency of any single item.
 
-The right performance goal follows from the system's purpose. A trading system, a web page, a background report, and a metrics pipeline may each need very different performance properties, and treating them the same is a common way to waste effort.
+The right performance goal follows from the system's purpose. A trading system, a web page, a background report, and a metrics pipeline may each need very different performance properties. Treating them the same is a common way to waste effort.
 
 ## Latency
 
-Latency is the elapsed time between an operation starting and its result becoming available. For a user request, it is often the time from receiving the request until the response is sent.
+Latency is the time between an operation starting and its result becoming available. For a user request, it is often the time from receiving the request until the response is sent.
 
 Latency is usually made of several waiting and processing stages, not just the computation:
 
@@ -58,7 +58,7 @@ flowchart LR
     Serialize --> Send[Send response]
 ```
 
-The total latency includes far more than the CPU instructions that compute the answer. A request may spend most of its time waiting for a connection, a lock, a disk, a remote service, or an available worker, and only a small slice actually doing arithmetic.
+The total latency includes far more than the CPU instructions that compute the answer. A request may spend most of its time waiting for a connection, a lock, a disk, a remote service, or an available worker. Only a small slice of the time is spent doing arithmetic.
 
 ### Why the average hides the slow requests
 
@@ -66,9 +66,9 @@ The average is computed by adding all observed latencies and dividing by the num
 
 Suppose ninety-nine requests take ten milliseconds and one request takes ten seconds. The average is higher than the normal request time, but it still does not tell us how many users felt the slow result, or what the tail of the distribution looks like.
 
-A percentile describes the value below which a given percentage of observations fall. If the 95th-percentile latency is two hundred milliseconds, then 95 percent of measured requests finished within two hundred milliseconds and 5 percent took longer. The 99th percentile focuses on an even slower slice of the distribution.
+A percentile is a way to describe where most requests fall. It names the value below which a given percentage of observations sit. If the 95th-percentile latency is two hundred milliseconds, then 95 percent of measured requests finished within two hundred milliseconds and 5 percent took longer. The 99th percentile focuses on an even slower slice of the distribution.
 
-Tail latency is the latency of the slowest portion of requests. It matters because users and upstream services often feel the tail directly, and because a single slow dependency can drag down an entire request chain. If one request calls five services, the chance that at least one of them is slow goes up. A service that is fast at the 99th percentile on its own may still cause slow end-to-end requests once many such calls are combined.
+Tail latency is the latency of the slowest portion of requests. It matters because users and upstream services often feel the tail directly. A single slow dependency can drag down an entire request chain. If one request calls five services, the chance that at least one of them is slow goes up. A service that is fast at the 99th percentile on its own may still cause slow end-to-end requests once many such calls are combined.
 
 ## Throughput
 
@@ -103,13 +103,13 @@ xychart-beta
     line "Latency" [5, 7, 10, 16, 28, 52, 90]
 ```
 
-The exact curve differs from system to system, but the pattern is common: throughput improves until some resource becomes saturated, while latency often rises earlier because requests begin waiting in queues before the resource is fully maxed out.
+The exact curve differs from system to system, but the pattern is common. Throughput improves until some resource becomes saturated. Latency often rises earlier, because requests begin waiting in queues before the resource is fully used.
 
 ## The critical path
 
-The critical path is the sequence of work that decides when an operation can finish. Work outside the critical path may run in parallel or asynchronously without delaying the response at all.
+The critical path is the sequence of work that decides when an operation can finish. Work outside the critical path may run in parallel or in the background without delaying the response at all.
 
-For a request that loads a user profile and recommendations, the application may need the profile before it can respond, but it may be able to load recommendations independently or use a cached result.
+Suppose a request must load a user profile and a list of recommendations. The application may need the profile before it can respond. But it may be able to load the recommendations on its own, or use a cached result for them.
 
 ```mermaid
 flowchart TD
@@ -120,9 +120,9 @@ flowchart TD
     Merge --> Response[Send response]
 ```
 
-If both branches must finish, the request is limited by the slower branch plus whatever coordination overhead sits between them. If recommendations are optional, the system may return the profile without waiting for them, and the critical path shrinks.
+If both branches must finish, the request is limited by the slower branch plus the coordination overhead between them. If the recommendations are optional, the system may return the profile without waiting for them. Then the critical path shrinks.
 
-Finding the critical path helps an engineer decide whether to optimize work, remove work, parallelize work, cache work, or make some work optional. Most real performance wins come from one of those five moves.
+Finding the critical path helps an engineer decide whether to optimize work, remove work, run it in parallel, cache it, or make it optional. Most real performance wins come from one of those five moves.
 
 ## Queueing and waiting
 
@@ -140,17 +140,17 @@ Deadlines are missed
 Retries or new work add more load
 ```
 
-The arrival rate is how quickly work enters a component. The service rate is how quickly the component completes work. If the arrival rate stays above the service rate, no amount of queue tuning will prevent eventual overload. The system has to reduce arrivals, increase service capacity, reject work, or move work onto another resource.
+The arrival rate is how quickly work enters a component. The service rate is how quickly the component completes work. If the arrival rate stays above the service rate, no amount of queue tuning will prevent eventual overload. The system has to cut arrivals, raise service capacity, reject work, or move work onto another resource.
 
-Queueing also explains why latency can jump suddenly near saturation. When utilization is low, a request often starts immediately. As utilization approaches the limit, even a small burst can form a queue, and that queue adds delay to every request behind it.
+Queueing also explains why latency can jump suddenly near saturation. When utilization is low, a request often starts immediately. As utilization approaches the limit, even a small burst can form a queue. That queue adds delay to every request behind it.
 
 This is why leaving headroom matters. A system that runs permanently at its maximum measured throughput has almost no room for bursts, failures, maintenance, or measurement error.
 
 ## Utilization and saturation are not the same
 
-Utilization describes how busy a resource is. CPU utilization, memory usage, storage bandwidth, and network bandwidth are the usual examples.
+Utilization describes how busy a resource is. CPU use, memory usage, storage bandwidth, and network bandwidth are the usual examples.
 
-Saturation describes whether additional work is forced to wait because the resource has no immediate capacity left. A resource can have high utilization without being harmful, as long as work still lands within its latency target and queues do not grow. A resource can also have moderate average utilization yet experience short saturation periods that produce unacceptable tail latency.
+Saturation describes whether extra work is forced to wait because the resource has no immediate capacity left. A resource can have high utilization without being harmful, as long as work still lands within its latency target and queues do not grow. A resource can also have moderate average utilization yet still hit short saturation periods that produce unacceptable tail latency.
 
 Important signals to watch include:
 
@@ -163,13 +163,13 @@ Important signals to watch include:
 - Error rate
 - Tail latency
 
-Looking at utilization alone can lead to bad conclusions. A service with low CPU usage may simply be waiting on a database. A service with high CPU usage may be healthy if it has enough capacity and stable latency. A database with moderate CPU may still be limited by locks or storage latency.
+Looking at utilization alone can lead to bad conclusions. A service with low CPU use may simply be waiting on a database. A service with high CPU use may be healthy if it has enough capacity and stable latency. A database with moderate CPU may still be limited by locks or storage latency.
 
 ## Capacity and headroom
 
 Capacity is the amount of work a system can handle while still meeting its requirements. It is not merely the maximum amount of work the machine can physically accept before it falls over.
 
-If a service can process a thousand requests per second before its latency becomes unacceptable, its useful capacity may be much lower than the rate at which it can technically accept requests.
+Suppose a service can process a thousand requests per second before its latency becomes unacceptable. Its useful capacity may be much lower than the rate at which it can technically accept requests.
 
 Headroom is unused capacity reserved for bursts, failures, deployments, growth, and uncertainty. A service running at 95 percent of every resource limit may look efficient, but it is fragile. One slow dependency or one failed instance can push the remaining instances into saturation.
 
@@ -181,7 +181,7 @@ The right amount of headroom depends on traffic variability, recovery time, scal
 
 A bottleneck is the part of the system that limits end-to-end progress. It may be a CPU core, a lock, a database query, a disk, a network link, a connection pool, or even a human approval step.
 
-The busiest component is not always the bottleneck. A component may be busy doing work that is not on the critical path, while a lightly used lock or queue is what makes most requests wait.
+The busiest component is not always the bottleneck. A component may be busy doing work that is not on the critical path. Meanwhile, a lightly used lock or queue may be what makes most requests wait.
 
 The bottleneck also tends to move after an optimization.
 
@@ -208,7 +208,7 @@ A useful performance investigation usually has four parts:
 
 The baseline should carry enough context to explain the result. Record the software version, configuration, input size, concurrency, machine type, dependency state, and whether caches are warm or cold.
 
-Without that context, two benchmark results can look different while actually measuring different workloads, which makes the comparison meaningless.
+Without that context, two benchmark results can look different while actually measuring different workloads. That makes the comparison meaningless.
 
 ### Warm and cold behavior
 
@@ -216,7 +216,7 @@ A warm cache holds data the system has used recently. A cold cache does not. A p
 
 Both conditions can matter. Warm behavior may represent normal steady-state traffic. Cold behavior may represent a restart, a new deployment, a new tenant, or a cache eviction event.
 
-The benchmark should state which condition it measures, instead of presenting one number as if it applied everywhere.
+The benchmark should state which condition it measures. It should not present one number as if it applied everywhere.
 
 ### Microbenchmarks versus real workloads
 
@@ -224,11 +224,11 @@ A microbenchmark measures a small operation in isolation. It is useful for compa
 
 A real workload includes parsing, allocation, logging, scheduling, network calls, storage, contention, and background work. An optimization that makes one function 20 percent faster may have no visible effect if that function is only 1 percent of total request time.
 
-This is an example of Amdahl's law, the observation that total speedup is limited by the part of the workload that was not improved. If only a small fraction of the total time is spent in the optimized section, the end-to-end gain is bounded by that fraction.
+This is an example of Amdahl's law. That is the observation that total speedup is limited by the part of the workload that was not improved. If only a small fraction of the total time is spent in the optimized section, the end-to-end gain is bounded by that fraction.
 
 ## A small code example: measure the whole operation
 
-Suppose a service processes records in batches. A benchmark should measure the operation in a way that includes the work that matters and prevents the compiler from removing unused results.
+Suppose a service processes records in batches. A benchmark should measure the operation in a way that includes the work that matters. It should also stop the compiler from removing unused results.
 
 ```go
 func BenchmarkProcessBatch(b *testing.B) {
@@ -252,7 +252,7 @@ This is still only a local measurement. It does not tell us how the function beh
 
 Profiling collects evidence about where a program spends CPU time, memory, lock time, or I/O time. A CPU profile may show a service burning time in parsing, encryption, garbage collection, or a retry loop. A memory profile may show allocation rate or retained objects. A lock profile may show contention.
 
-The profile does not automatically name the correct solution. It names where the measured workload spent time. The engineer still has to ask whether that work is required, whether it can be reduced, whether it can be parallelized, and whether changing it creates a new problem elsewhere.
+The profile does not automatically name the correct solution. It names where the measured workload spent time. The engineer still has to ask whether that work is required, whether it can be reduced, whether it can be run in parallel, and whether changing it creates a new problem elsewhere.
 
 For example, if a profile shows a service spending 30 percent of CPU time serializing data, possible responses include reducing fields, changing the format, reusing buffers, compressing less, or moving serialization to another stage. The right choice depends on network bandwidth, compatibility, memory, and latency requirements, not on the profile alone.
 
@@ -264,7 +264,7 @@ Several familiar techniques improve performance, but each one changes another pr
 
 The best optimization is often simply avoiding the work. Filtering data earlier, selecting only the columns you need, avoiding repeated parsing, and not generating results nobody consumes can improve performance without adding a new subsystem.
 
-Removing work is usually safer than making the same work faster, because it also reduces resource usage and the surface area where things can fail.
+Removing work is usually safer than making the same work faster. It also reduces resource usage and the surface area where things can fail.
 
 ### Cache results you will reuse
 
@@ -286,7 +286,7 @@ Parallelism is worthwhile only when the work is genuinely independent and the sy
 
 Scaling up gives more capacity on one machine. Scaling out adds more machines or processes. Both can help, but they may expose a new bottleneck and add cost or coordination complexity.
 
-Adding capacity is often the right short-term response to growth, but it should not be used to hide an unbounded leak, an inefficient query, or a missing overload policy.
+Adding capacity is often the right short-term response to growth. But it should not be used to hide an unbounded leak, an inefficient query, or a missing overload policy.
 
 ## Performance and simplicity trade off
 
@@ -339,13 +339,13 @@ Retries add more work
 System becomes less reliable
 ```
 
-Performance engineering therefore includes limits, timeouts, backpressure, load shedding, and graceful degradation. A fast design that fails catastrophically under overload is not a good production design.
+Performance engineering therefore includes limits, timeouts, backpressure, load shedding, and graceful degradation. A fast design that fails catastrophically under overload is not a good design for production.
 
 ## How engineers actually approach a performance problem
 
 An experienced engineer does not begin by naming an optimization. They first clarify the impact and the workload.
 
-They ask:
+They ask the following questions:
 
 1. Which user or system behavior is too slow?
 2. Is the problem latency, throughput, capacity, cost, or all of them?
@@ -358,7 +358,7 @@ They ask:
 9. What new failure mode will the change introduce?
 10. How will the improvement be measured after deployment?
 
-This process prevents two common mistakes: optimizing a component that is not limiting the result, and improving normal-case speed while making overload behavior unsafe.
+This process prevents two common mistakes. One is optimizing a component that is not limiting the result. The other is improving normal-case speed while making overload behavior unsafe.
 
 ## Definitions
 
@@ -424,7 +424,7 @@ An optimized function may not matter if it is a small part of the critical path.
 
 ### "High utilization means the system is healthy."
 
-High utilization can be healthy when latency and queues stay controlled. Near saturation, small bursts or failures can create large delays, so headroom and wait time matter too.
+High utilization can be healthy when latency and queues stay controlled. Near saturation, small bursts or failures can create large delays. Headroom and wait time matter too.
 
 ### "More concurrency always increases throughput."
 
@@ -440,7 +440,7 @@ Slow work occupies resources longer, causes queues and timeouts, and can trigger
 
 ## Summary
 
-Performance is a set of constraints around time, work, capacity, and resource usage. Latency describes one operation, throughput describes completed work, and tail latency shows the experience of slower requests. Capacity and headroom decide how a system behaves during growth, bursts, and failures.
+Performance is a set of constraints around time, work, capacity, and resource usage. Latency describes one operation. Throughput describes completed work. Tail latency shows the experience of slower requests. Capacity and headroom decide how a system behaves during growth, bursts, and failures.
 
 The practical method is to define a real requirement, measure a representative workload, find the critical path and bottleneck, make the smallest useful change, and measure again. Caching, batching, parallelism, and scaling can help, but each one introduces tradeoffs and new failure modes.
 

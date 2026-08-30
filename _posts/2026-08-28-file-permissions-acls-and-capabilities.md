@@ -10,21 +10,29 @@ stage_order: 7
 series_order: 3
 ---
 
-The previous chapter explained what a file is and how a path reaches it. This chapter explains who is allowed to touch it. It is the third article of Stage 7, completing the subject of file descriptors and filesystem interfaces.
+The previous chapter explained what a file is and how a path reaches it. This chapter explains who is allowed to touch it. It is the third article of Stage 7. It completes the subject of file descriptors and filesystem interfaces.
 
-Every operation on a file is checked against an identity and a policy. The identity is the process's user and group, plus a set of capabilities in the Linux model. The policy is the file's permission mode, its access control list, and the kernel's rules for evaluating them. A backend engineer meets this constantly: a service that cannot read a config, a setuid binary that runs as the wrong user, a container that lacks a privilege it needs, or a file created world-writable by a bad umask. Understanding the model turns these from mysteries into predictable checks. This article is a reference covering process identity in full, the Unix mode and its special bits, ACLs including default ACLs, the capability model and how privileges survive `exec`, mandatory access control, and the practical tools for observing all of it.
+Every file operation is checked against two things: an identity and a policy. The identity is the process user and the process group. On Linux it also includes a set of capabilities. The policy is the file permission mode, its access control list, and the kernel rules for checking them.
+
+A backend engineer hits these checks all the time. A service cannot read a config file. A setuid binary runs as the wrong user. A container lacks a privilege it needs. A bad umask creates a file that anyone can write to. Understanding the model turns these puzzles into predictable checks.
+
+This article is a reference. It covers the process identity in full. It covers the Unix mode and its special bits. It covers ACLs, including default ACLs. It covers the capability model and how privileges survive `exec`. It covers mandatory access control. It covers the tools you use to observe all of it.
 
 ## Users, groups, and the process identity
 
-A Unix system identifies principals by numeric user identifiers and group identifiers. A file has an owning user and an owning group. A process has its own identity, and on Linux that identity is more than one number. A process has a real uid (who started it), an effective uid (used for access checks), and a saved-set uid (used to switch back after a setuid transition). It also has a real gid, an effective gid, a saved-set gid, and a list of supplementary groups.
+A Unix system names principals with numbers. These numbers are the user identifier (uid) and the group identifier (gid). A file has an owning user and an owning group. A process has its own identity. On Linux this identity is more than one number. A process has a real uid. This is the user who started the process. It has an effective uid. The kernel uses this for access checks. It also has a saved-set uid. A setuid program uses this to switch back after it changes identity. A process also has a real gid, an effective gid, a saved-set gid, and a list of supplementary groups.
 
-The effective uid and groups are what the kernel uses for access checks. This is why a setuid program runs with the file owner's effective uid even though its real uid is still the invoking user, and why a process in a particular group can access files owned by that group even if it was started by a different user. Group membership, including supplementary groups, is how shared access is granted without sharing a user. The saved-set uid exists so a setuid program can drop to the real uid and later regain the privileged one, the basis of the `seteuid` dance that privileged daemons use to hold privilege only while needed.
+The kernel uses the effective uid and the effective groups for access checks. This is why a setuid program runs with the file owner's effective uid. Its real uid is still the user who launched it. A process in a group can open files owned by that group. This works even if a different user started the process. Group membership gives shared access without sharing a user account. A process adds a user to a group to share files.
+
+The saved-set uid lets a setuid program drop to the real uid and later regain the privileged one. Privileged daemons use this trick to hold privilege only when they need it. The trick is the `seteuid` call.
 
 ## The Unix permission model
 
-The basic permission model is nine bits: read, write, and execute for the owning user, for the owning group, and for everyone else. The execute bit on a file means the file may be run as a program; on a directory it means the search permission that lets you look up names within it. The bits are usually written in octal, such as 0644 for a readable file or 0755 for a runnable program.
+The basic model uses nine bits. Three kinds of access exist: read, write, and execute. Three parties get them: the owning user, the owning group, and everyone else. The execute bit on a file means the file can run as a program. On a directory it means search permission. Search permission lets you look up names inside the directory. We write the bits in octal. For example 0644 is a readable file. 0755 is a runnable program.
 
-The model is a three-way match. The kernel decides which of the three triplets applies to the process: if the process's effective uid equals the file's owner, the owner triplet applies; else if the process is a member of the file's group, the group triplet applies; else the other triplet applies. This simple structure covers most cases, which is why it has survived for decades, but it is coarse: it cannot express "this specific user besides the owner" or "this specific group besides the owning one." That is what ACLs add.
+The model is a three-way match. The kernel picks one of the three triplets. If the process effective uid equals the file owner, the owner triplet applies. Else if the process is in the file group, the group triplet applies. Else the other triplet applies.
+
+This simple structure covers most cases. That is why it has lasted for decades. But it is coarse. It cannot say "this one extra user besides the owner." It cannot say "this one extra group besides the owning group." ACLs add that power.
 
 On top of the nine bits sit three special bits, also expressed in octal:
 
@@ -34,11 +42,13 @@ On top of the nine bits sit three special bits, also expressed in octal:
 | 2000 | setgid | Runs with file's group; also forces file group to owner's group on some systems | New files inherit the directory's group |
 | 1000 | sticky | (no standard effect) | Only file or directory owner and root may delete or rename within it |
 
-These octal values compose with the permission bits: 4755 is setuid plus 0755, 2770 is setgid plus group-writable, 1777 is the sticky world-writable pattern of `/tmp`.
+These octal values add to the permission bits. 4755 is setuid plus 0755. 2770 is setgid plus group-writable. 1777 is the sticky world-writable pattern of `/tmp`.
 
 ## Setuid, setgid, and the sticky bit
 
-The setuid bit on an executable means that when run, the process gets the file owner's effective uid. This is how a program like `passwd` can write to a privileged file while being launched by an ordinary user: it runs as root for the duration of its task, then drops privileges. The setgid bit is the analogous mechanism for the group, and on a directory it has a different meaning: new files created there inherit the directory's group, which is how a shared group directory stays group-owned.
+The setuid bit sits on an executable. When the program runs, the process gets the file owner's effective uid. This is how `passwd` can write to a privileged file. An ordinary user launches it. It runs as root for the task. Then it drops the privilege.
+
+The setgid bit works the same way for the group. On a directory it means something else. New files created there inherit the directory's group. A shared group directory stays group-owned this way.
 
 ```mermaid
 flowchart LR
@@ -47,23 +57,31 @@ flowchart LR
     Work --> Drop[Process drops back to real uid]
 ```
 
-The sticky bit, when set on a directory, restricts deletion: only the file's owner, the directory's owner, or root may delete or rename files within it, even if others have write access to the directory. This is why `/tmp` is world-writable yet one user cannot delete another's files there. It is a small but important protection for shared directories, and the same bit is meaningless on regular files.
+The sticky bit sits on a directory. It restricts deletion. Only the file owner, the directory owner, or root may delete or rename files inside. This holds even if other users have write access to the directory. That is why `/tmp` is world-writable yet one user cannot delete another user's files. The sticky bit is a small but useful protection for shared directories. On a regular file the bit does nothing.
 
 ## How ownership changes
 
-Changing a file's owner or group is itself a privileged operation. Only a process with `CAP_CHOWN` (traditionally root) may `chown` a file to any user, and a non-privileged process may at most change the group to one of its own supplementary groups. The historical "give away" semantics, where a non-root owner could `chown` a file to someone else and lose access, are restricted on Linux by `fs.protected_hardlinks` and similar sysctls, because giving away a file you still hold open is a classic privilege-escalation trick. The owner of a file can always change its own permissions and, with `CAP_FOWNER` or ownership, its group, which is the deliberate exception that an owner is never locked out of their own metadata.
+Changing a file's owner or group is itself a privileged operation. Only a process with `CAP_CHOWN` may `chown` a file to any user. Traditionally that means root. A non-privileged process can at most change the group to one of its own supplementary groups.
+
+Old Unix systems allowed a non-root owner to give a file away. The owner could `chown` the file to someone else and lose access. Linux blocks this with `fs.protected_hardlinks` and similar sysctls. Giving away a file you still hold open is a classic privilege-escalation trick.
+
+The owner of a file can always change its own permissions. With `CAP_FOWNER` or ownership, the owner can also change its group. This is a deliberate rule. An owner is never locked out of their own metadata.
 
 ## Access control lists
 
-An ACL extends the three-triplet model with per-user and per-group rules. Where the basic mode says "group members get read", an ACL can say "user alice gets read and write, group qa gets read." Each rule is an entry, and the list is consulted after the traditional mode, with the ACL mask limiting the maximum permissions any entry may grant.
+An ACL extends the three-triplet model. It adds per-user and per-group rules. The basic mode says "group members get read." An ACL can say "user alice gets read and write, group qa gets read." Each rule is one entry. The kernel checks the list after the basic mode. The ACL mask limits the maximum permissions any entry may grant.
 
-ACLs are stored as extended attributes on the inode, which is why the previous chapter's xattr discussion matters here. The entry types are `ACL_USER_OBJ` (the owner), `ACL_USER` (a named user), `ACL_GROUP_OBJ` (the owning group), `ACL_GROUP` (a named group), `ACL_MASK` (the cap on named-user, named-group, and group-obj rights), and `ACL_OTHER` (everyone else). A directory can also carry a default ACL, which is applied to newly created children so they inherit a policy instead of relying on umask alone, which is how a team keeps every file under a shared tree readable by the team group automatically.
+The kernel stores ACLs as extended attributes on the inode. That is why the previous chapter's xattr discussion matters here. The entry types are `ACL_USER_OBJ` (the owner), `ACL_USER` (a named user), `ACL_GROUP_OBJ` (the owning group), `ACL_GROUP` (a named group), `ACL_MASK` (the cap on named-user, named-group, and group-obj rights), and `ACL_OTHER` (everyone else).
 
-Tools are `getfacl` and `setfacl`. A common confusion is the mask: setting an ACL entry does not guarantee that permission if the mask is narrower, because the mask caps the effective rights. When you change the group permission with `chmod`, you may be silently lowering the ACL mask and surprising later readers. The `ls` plus sign only tells you an ACL exists; it says nothing about whether access is wider or narrower, which is why `getfacl` is the real source of truth.
+A directory can also carry a default ACL. The kernel applies it to newly created children. They inherit a policy instead of relying on umask alone. This is how a team keeps every file under a shared tree readable by the team group.
+
+The tools are `getfacl` and `setfacl`. A common confusion is the mask. Setting an ACL entry does not guarantee that permission. The mask may be narrower. The mask caps the effective rights. When you change the group permission with `chmod`, you may silently lower the ACL mask. That surprises later readers.
+
+The `ls` plus sign only tells you an ACL exists. It says nothing about whether access is wider or narrower. `getfacl` is the real source of truth.
 
 ## Capabilities: privilege without full root
 
-Linux divides the traditional all-powerful root into a set of capabilities, each granting one class of privilege. A process can hold capabilities regardless of whether its uid is zero, and a non-root process with the right capability can do what used to require full root. Important ones include:
+Linux splits the old all-powerful root into a set of capabilities. Each capability grants one class of privilege. A process can hold capabilities even if its uid is not zero. A non-root process with the right capability can do what used to require full root. Important ones include:
 
 | Capability | Grants |
 |---|---|
@@ -79,7 +97,9 @@ Linux divides the traditional all-powerful root into a set of capabilities, each
 | `CAP_IPC_LOCK` | Lock memory and bypass memory limits |
 | `CAP_SYS_PTRACE` | Inspect and modify other processes |
 
-A process carries capabilities in several sets: the permitted set (the maximum it may ever use), the effective set (what is currently active), the inheritable set (what may pass across `exec`), and the ambient set (capabilities that survive `exec` for non-root processes and are added to the permitted and effective sets of the executed program). There is also a bounding set that limits which capabilities can ever be gained, even by `CAP_SYS_ADMIN`. A binary can carry a file capability in the `security.capability` xattr, so that when executed it gains specific capabilities without being setuid root, which is the modern replacement for setuid binaries like `ping`.
+A process carries capabilities in several sets. The permitted set is the maximum it may ever use. The effective set is what is active now. The inheritable set is what may pass across `exec`. The ambient set holds capabilities that survive `exec` for non-root processes. The kernel adds them to the permitted and effective sets of the executed program.
+
+There is also a bounding set. It limits which capabilities can ever be gained, even by `CAP_SYS_ADMIN`. A binary can carry a file capability in the `security.capability` xattr. When executed, it gains specific capabilities without being setuid root. This is the modern replacement for setuid binaries like `ping`.
 
 ```mermaid
 flowchart LR
@@ -88,29 +108,43 @@ flowchart LR
     A[Ambient set] --> R
 ```
 
-The diagram shows how privilege is computed at `exec`: the process's sets combine with the executable's file capability and the ambient set to produce the new process's capabilities. Capabilities appear in `/proc/<pid>/status` under `CapEff`, `CapPrm`, `CapInh`, and `CapBnd`, and they are managed with `capsh`, `getpcaps`, or set on containers and executables. Securebits are a further control that can lock capability changes and prevent a process from regaining privileges, useful for hardening.
+The diagram shows how privilege is computed at `exec`. The process sets combine with the executable's file capability and the ambient set. Together they produce the new process capabilities.
+
+Capabilities appear in `/proc/<pid>/status` under `CapEff`, `CapPrm`, `CapInh`, and `CapBnd`. You manage them with `capsh`, `getpcaps`, or by setting them on containers and executables. Securebits are a further control. They can lock capability changes and stop a process from regaining privileges. This helps harden a system.
 
 ## Mandatory access control
 
-The Unix mode and ACLs are discretionary: the file owner decides who may access it. Mandatory access control, or MAC, adds a system-wide policy that even the owner cannot override. On Linux the common implementations are SELinux and AppArmor. They can deny access that the Unix permission bits would have allowed, which is why a root process can still get "permission denied" for reasons that are not the file mode. When debugging, a denial that survives correcting the mode and ACL usually means a MAC rule or a mount flag is interfering. MAC contexts are themselves stored as extended attributes (for example the `security.selinux` xattr), tying back to the inode metadata discussed earlier.
+The Unix mode and ACLs are discretionary. The file owner decides who may access the file. Mandatory access control, or MAC, adds a system-wide policy. The owner cannot override it.
+
+On Linux the common MAC systems are SELinux and AppArmor. They can deny access that the Unix permission bits would allow. A root process can still get "permission denied" for reasons that are not the file mode.
+
+When you debug, a denial that survives a correct mode and ACL usually means a MAC rule or a mount flag. MAC contexts are stored as extended attributes. For example the `security.selinux` xattr. This ties back to the inode metadata discussed earlier.
 
 ## Umask and the default permission of new files
 
-When a program creates a file, the mode it requests is modified by the process umask, which masks off bits. A common default umask of 022 turns a requested 0666 into 0644 and a requested 0777 into 0755, which is why files are not world-writable by default. A umask of 077 would make new files accessible only to the owner. A default ACL on the parent directory can override the umask for the group and other portions, which is why a directory with a default ACL may produce files whose permissions do not match the simple umask formula.
+When a program creates a file, the process umask modifies the requested mode. The umask masks off bits. A common default umask of 022 turns a requested 0666 into 0644. It turns a requested 0777 into 0755. That is why files are not world-writable by default. A umask of 077 would make new files accessible only to the owner.
 
-The umask is a process property inherited across `fork` and `exec`, so it depends on how the process was started, including its init system and container environment. A container or shell that sets umask to 0000 will create world-readable and world-writable files, which is a frequent source of accidental exposure. The robust practice is to set an explicit umask and to request an explicit mode, rather than relying on defaults.
+A default ACL on the parent directory can override the umask for the group and other portions. A directory with a default ACL may produce files whose permissions do not match the simple umask formula.
+
+The umask is a process property. It is inherited across `fork` and `exec`. It depends on how the process started. The init system and the container environment matter. A container or shell that sets umask to 0000 will create world-readable and world-writable files. This is a frequent source of accidental exposure.
+
+The robust practice is to set an explicit umask. Also request an explicit mode. Do not rely on defaults.
 
 ## How the kernel performs an access check
 
-An access check answers whether a process may open, read, write, or execute a file. The kernel first checks whether the process is privileged: if the effective uid is zero and the operation is not forbidden, or if the process holds `CAP_DAC_OVERRIDE`, the access is allowed regardless of the mode. This is the root bypass, and it is why root ignores permission bits.
+An access check answers one question. May the process open, read, write, or execute a file? The kernel first checks whether the process is privileged. If the effective uid is zero and the operation is not forbidden, the access is allowed. If the process holds `CAP_DAC_OVERRIDE`, the access is allowed. This is the root bypass. It is why root ignores permission bits.
 
-If not privileged, the kernel matches the process to the file's owner, group, or other triplet as described earlier, and checks the requested permission against that triplet. If an ACL is present, it refines the decision using the matching entries and the mask. The owner of the file is special: the owner may always change the file's permissions and ownership, even without other permissions, which is a deliberate exception so an owner is never locked out of their own file.
+If not privileged, the kernel matches the process to the file's owner, group, or other triplet. This is the match described earlier. The kernel checks the requested permission against that triplet. If an ACL is present, it refines the decision. It uses the matching entries and the mask.
 
-The `access` syscall checks permissions the way the kernel would, but it should be used with care: the result can be stale by the time the program acts on it, a time-of-check-to-time-of-use or TOCTOU race. The correct pattern is to attempt the operation and handle the error, rather than to pre-check with `access`. The order of layers matters for debugging. A "permission denied" that appears for root usually means a different block, such as a mount flag (`nosuid`, read-only) or a MAC system like SELinux, not the Unix mode. A "permission denied" for a non-root process is usually the triplet or ACL, and the fix is to adjust the mode, group, or ACL rather than to run as root.
+The owner of the file is special. The owner may always change the file's permissions and ownership. This holds even without other permissions. This is a deliberate exception. An owner is never locked out of their own file.
+
+The `access` syscall checks permissions the way the kernel would. Use it with care. The result can be stale by the time the program acts on it. This is a time-of-check-to-time-of-use race, or TOCTOU race. The correct pattern is to attempt the operation and handle the error. Do not pre-check with `access`.
+
+The order of layers matters for debugging. A "permission denied" for root usually means a different block. The block may be a mount flag such as `nosuid` or read-only. It may be a MAC system like SELinux. It is not the Unix mode. A "permission denied" for a non-root process is usually the triplet or the ACL. The fix is to adjust the mode, group, or ACL. Do not run as root.
 
 ## Observing permissions and capabilities
 
-The shell shows the basic mode in `ls -l`, and deeper detail in `stat`. ACLs require `getfacl`, because `ls` only hints at their presence with a plus sign. Capabilities of a running process are in `/proc/<pid>/status`, summarized by `getpcaps`.
+The shell shows the basic mode with `ls -l`. It shows deeper detail with `stat`. ACLs need `getfacl`. `ls` only hints at their presence with a plus sign. The capabilities of a running process are in `/proc/<pid>/status`. `getpcaps` summarizes them.
 
 ```bash
 ls -l config.yaml
@@ -154,27 +188,49 @@ func main() {
 }
 ```
 
-What it shows is that the created mode depends on umask, and that the program can read both the file's owner and its own effective identity. The `chmod` call sets an explicit mode, which is the reliable way to get the permissions you intend regardless of umask. For capability checks, reading `/proc/self/status` CapEff tells you what the process may actually do, and `namei -l` walks a path showing the permission bits the kernel evaluated at each component, which exposes where a check failed.
+The sample shows two things. The created mode depends on umask. The program can read both the file's owner and its own effective identity.
+
+The `chmod` call sets an explicit mode. This is the reliable way to get the permissions you intend. It works regardless of umask.
+
+For capability checks, read `/proc/self/status` CapEff. It tells you what the process may actually do. Use `namei -l` to walk a path. It shows the permission bits the kernel evaluated at each component. This exposes where a check failed.
 
 ## A realistic production example
 
-A team deployed a service as a non-root user for good security hygiene, but the service needed to bind port 80 and to read a privileged credentials file. The historical answer would have been to make the binary setuid root, but that gives the whole process root for its entire lifetime, which the team wanted to avoid. They instead granted two narrowly scoped capabilities via the deployment: `CAP_NET_BIND_SERVICE` so the service could bind port 80, and read access to the credentials file through group membership and a precise ACL rather than world-readable mode. They also set a default ACL on the credentials directory so rotated files kept the same access policy automatically.
+A team deployed a service as a non-root user. This is good security hygiene. The service needed to bind port 80. It also needed to read a privileged credentials file.
 
-A second, separate incident showed the other failure mode. A batch job ran in a container whose base image set umask to 0000. The job wrote output files that were created world-readable and world-writable, including a file containing temporary secrets. A security scan flagged world-writable files in a shared directory. The fix was to set the umask to 0027 in the container's startup and to open files with an explicit mode, so outputs were readable only by the owner and group. Together the two incidents show both halves of the model: grant the minimum privilege you actually need through capabilities and ACLs, and never let a permissive umask decide your file exposure for you.
+The old answer would be to make the binary setuid root. That gives the whole process root for its entire lifetime. The team wanted to avoid that.
+
+They instead granted two narrow capabilities in the deployment. `CAP_NET_BIND_SERVICE` let the service bind port 80. Group membership and a precise ACL gave read access to the credentials file. They avoided a world-readable mode.
+
+They also set a default ACL on the credentials directory. Rotated files kept the same access policy automatically.
+
+A second incident showed the other failure mode. A batch job ran in a container. The base image set umask to 0000. The job wrote output files that were world-readable and world-writable. One file held temporary secrets. A security scan flagged the world-writable files in a shared directory.
+
+The fix was to set the umask to 0027 in the container startup. The job opened files with an explicit mode. Outputs were then readable only by the owner and group.
+
+The two incidents show both halves of the model. Grant the minimum privilege you need through capabilities and ACLs. Never let a permissive umask decide your file exposure.
 
 ## How engineers actually reason about access
 
-They separate identity from policy. The process identity (uid, gids, capabilities) is one side; the file's mode, ACL, and owning metadata is the other. A denial is a mismatch between them, and the fix is usually to adjust the narrower side rather than to become root.
+They separate identity from policy. The process identity is one side. It holds the uid, gids, and capabilities. The file's mode, ACL, and owning metadata is the other side. A denial is a mismatch between them. The fix is usually to adjust the narrower side. Do not become root.
 
-They prefer capabilities over setuid. Running as root or setuid root grants far more than needed and widens the impact of any bug. A single capability gives the one privilege required and nothing else, which is the principle of least privilege in practice, and file capabilities let a specific binary gain it without a setuid bit.
+They prefer capabilities over setuid. Running as root or setuid root grants far more than needed. It widens the impact of any bug. A single capability gives the one privilege required. It gives nothing else. This is the principle of least privilege in practice. File capabilities let a specific binary gain it without a setuid bit.
 
-They set permissions explicitly. Relying on umask for security is fragile because it depends on the process's start environment. Requesting an explicit mode, using default ACLs on shared trees, and verifying with `getfacl` when ACLs are involved produces predictable, auditable access.
+They set permissions explicitly. Relying on umask for security is fragile. It depends on the process start environment. Request an explicit mode. Use default ACLs on shared trees. Verify with `getfacl` when ACLs are involved. This produces predictable, auditable access.
 
-They respect the root bypass and its limits. Root ignores Unix mode bits, but it can still be stopped by mount flags and MAC systems, so "permission denied" for root points at those layers, not at the file mode. They use `namei -l` and `getpcaps` to localize the real cause instead of reaching for `chmod 777`.
+They respect the root bypass and its limits. Root ignores Unix mode bits. But mount flags and MAC systems can still stop it. A "permission denied" for root points at those layers. It does not point at the file mode. They use `namei -l` and `getpcaps` to find the real cause. They do not reach for `chmod 777`.
 
 ## Immutable attributes and setting capabilities in practice
 
-Beyond the discretionary and capability model, the kernel offers file attributes that change behavior regardless of the permission bits. chattr sets these on ext4, XFS, and others: the immutable bit (+i) prevents any modification, deletion, or link creation even by root until it is removed, which is useful for protecting critical files from accidental or compromised writes; the append-only bit (+a) allows only appending, used for audit logs that must not be edited; and the synchronous bit (+S) forces data writes to be committed synchronously, a per-file version of O_SYNC. lsattr displays these attributes, and they are an extra layer beneath the permission and capability checks.
+Beyond the discretionary model and the capability model, the kernel offers file attributes. These change behavior regardless of the permission bits. `chattr` sets them on ext4, XFS, and other filesystems.
+
+The immutable bit is `+i`. It prevents any modification, deletion, or link creation. Even root cannot do these until the bit is removed. It protects critical files from accidental or compromised writes.
+
+The append-only bit is `+a`. It allows only appending. Audit logs use it. The logs must not be edited.
+
+The synchronous bit is `+S`. It forces data writes to commit synchronously. It is a per-file version of O_SYNC.
+
+`lsattr` displays these attributes. They are an extra layer beneath the permission and capability checks.
 
 File capabilities are set in practice with setcap, which writes the security.capability xattr so that executing the binary grants the listed capabilities without making it setuid root. A web server that needs to bind a low port can be given cap_net_bind_service=+ep, removing the need for a setuid bit and shrinking the attack surface. Removing capabilities with setcap -r restores a normal binary. For mandatory access control, SELinux and AppArmor enforce policy beyond the Unix model; a process confined by a SELinux type may be denied a file that the permission bits would allow, which is why a permission denied that survives correcting the mode usually points at a MAC rule. In containers, the effective capabilities are the intersection of the runtime's granted set and the container's bounding and ambient sets, and dropping capabilities such as CAP_SYS_ADMIN is a standard hardening step.
 

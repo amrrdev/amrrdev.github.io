@@ -10,11 +10,11 @@ stage_order: 5
 series_order: 3
 ---
 
-The previous chapter showed that a process holds an address space and that many threads can live inside it. This chapter follows those threads to the CPUs where they actually run. It is the third article of Stage 5.
+The previous chapter showed that a process holds an address space and that many threads can live inside it. This chapter follows those threads to the CPUs where they run. It is the third article of Stage 5.
 
 Scheduling decides which thread runs on which CPU at each moment. Affinity says where a thread is allowed to run. NUMA describes which memory is close to which CPU. Together they decide whether a thread runs quickly on a nearby core with nearby memory or slowly while waiting for a distant core or distant memory.
 
-Load balancing moves runnable threads between CPUs so no CPU is idle while work waits elsewhere. Pinning keeps a thread on a set of CPUs to keep its caches warm or to keep it near a device queue, at the cost of making balance harder. Priority inversion, starvation, and real-time deadlines are the failure modes that appear when priority and affinity are chosen poorly.
+Load balancing moves runnable threads between CPUs so no CPU is idle while work waits elsewhere. Pinning keeps a thread on a set of CPUs to keep its caches warm or to keep it near a device queue, at the cost of making balance harder. Priority inversion, starvation, and missed real-time deadlines are the failure modes that appear when you choose priority and affinity poorly.
 
 ## How the scheduler sees the machine
 
@@ -31,15 +31,15 @@ flowchart LR
     Steal --> Run
 ```
 
-The diagram shows the two directions. Placement on wakeup and stealing on idle both move work, but they move it at different times and for different reasons. If the machine is lightly loaded, the same thread may run on the same CPU repeatedly and keep its cache warmth. If the machine is heavily loaded, threads move more often.
+The diagram shows the two directions. Placement on wakeup and stealing on idle both move work, but they do it at different times and for different reasons. If the machine is lightly loaded, the same thread may run on the same CPU again and again and keep its cache warm. If the machine is heavily loaded, threads move more often.
 
 ### How CFS decides with vruntime
 
-Linux's normal scheduler is called the Completely Fair Scheduler. Each runnable thread has a virtual runtime that grows as the thread runs, scaled by its nice value and weight. The scheduler keeps runnable threads in a red-black tree ordered by that virtual time and picks the thread with the smallest value, which is the thread that has had the least fair share so far. A thread with a lower nice value grows slower and is chosen more often, but the tree still ensures every runnable thread eventually gets a turn, which is how the scheduler avoids starvation without a fixed time slice table.
+Linux's normal scheduler is called the Completely Fair Scheduler. Each runnable thread has a virtual runtime that grows as the thread runs, scaled by its nice value and weight. The scheduler keeps runnable threads in a red-black tree ordered by that virtual time and picks the thread with the smallest value, which is the thread that has had the least fair share so far. A thread with a lower nice value grows slower and is chosen more often. But the tree still ensures every runnable thread gets a turn in the end. That is how the scheduler avoids starvation without using a fixed time slice table.
 
 ### Scheduling domains and cache awareness
 
-The scheduler does not treat all CPUs as equal. It groups them into domains for a single hardware thread, a core with two threads, a set of cores sharing a cache, and a socket with its own memory. Balancing happens at each level with different costs. Moving a thread within a core's shared cache is cheap, moving it across sockets is more expensive because its cache warmth is lost and its next accesses may be remote. That is why the scheduler prefers the least loaded CPU that is still near the thread's previous cache, not just the absolute least loaded CPU in the machine.
+The scheduler does not treat all CPUs as equal. It groups them into domains: a single hardware thread, a core with two threads, a set of cores that share a cache, and a socket with its own memory. Balancing happens at each level and the costs differ. Moving a thread within a core's shared cache is cheap. Moving it across sockets costs more because it loses its cache warmth and its next accesses may be remote. That is why the scheduler prefers the least loaded CPU that is still near the thread's previous cache. It does not just pick the least loaded CPU in the whole machine.
 
 ## Affinity and pinning
 
@@ -53,7 +53,7 @@ taskset -pc 2450
 taskset -pc 0-1 2450
 ```
 
-The first line shows the process and which CPU its threads last ran on. The second line shows the current allowed mask as a bitmask. The third line changes the mask to only CPUs 0 and 1. The change stays until it is changed again or the process exits.
+The first line shows the process and the CPU where its threads last ran. The second line shows the current allowed mask as a bitmask. The third line changes the mask to CPUs 0 and 1 only. The change lasts until you change it again or the process exits.
 
 In Go you can keep a goroutine on a fixed kernel thread for a short section.
 
@@ -75,11 +75,11 @@ func pinnedWork(wg *sync.WaitGroup) {
 }
 ```
 
-`LockOSThread` says the current goroutine should stay on its current kernel thread, and the thread stays where the scheduler placed it, subject to the process's affinity. A matching `UnlockOSThread` lets the goroutine move again. The pattern is useful around code that uses thread-local storage or a device queue that is per CPU.
+LockOSThread tells the current goroutine to stay on its current kernel thread. The thread stays where the scheduler placed it, as long as the process affinity allows it. A matching UnlockOSThread lets the goroutine move again. The pattern helps around code that uses thread-local storage or a per-CPU device queue.
 
-Pinning helps when you know that a thread and a device queue share a cache domain, or when you want to keep a latency-sensitive thread away from noisy neighbors. It hurts when the pinned CPU becomes the bottleneck while other CPUs could have taken the work, or when a pinned thread touches memory that is far away on a NUMA machine.
+Pinning helps when you know a thread and a device queue share a cache domain. It also helps when you want to keep a latency-sensitive thread away from noisy neighbors. It hurts when the pinned CPU becomes the bottleneck while other CPUs could have taken the work. It also hurts when a pinned thread touches memory that is far away on a NUMA machine.
 
-A basic read that makes affinity concrete without writing any pinning is to watch where a busy program runs.
+To see affinity in action without writing any pinning code, watch where a busy program runs.
 
 ```bash
 go run cpu_busy.go &
@@ -89,9 +89,9 @@ ps -o pid,tid,psr,comm -p $pid -L | head
 taskset -pc $pid
 ```
 
-What it demonstrates is that the same process appears on different CPUs over time when affinity is wide, and stays where you put it when affinity is narrow. The cost of narrow affinity shows up as higher run queue latency on the chosen CPU.
+This shows that the same process moves across different CPUs over time when affinity is wide. When affinity is narrow, it stays where you put it. The cost of narrow affinity shows up as higher run queue latency on the chosen CPU.
 
-A second exercise forces the tradeoff. Run two CPU-bound workers, first with wide affinity and then with both pinned to the same CPU, and compare elapsed time and context switches.
+A second exercise forces the tradeoff. Run two CPU-bound workers. First use wide affinity. Then pin both to the same CPU. Compare elapsed time and context switches.
 
 ```bash
 go run two_workers.go
@@ -99,13 +99,13 @@ taskset -c 0 go run two_workers.go
 perf stat -e context-switches,cpu-migrations ./two_workers 2>&1 | head
 ```
 
-You will typically see that pinning both workers to one CPU makes them take turns on the same core while the other cores are idle, so elapsed time grows even though the work is the same.
+You will usually see that pinning both workers to one CPU makes them take turns on the same core. The other cores stay idle. Elapsed time grows even though the work is the same.
 
 ## NUMA locality
 
 NUMA means that the time to access memory depends on which CPU touches which memory. A machine with two sockets has two memory controllers. Memory attached to the socket where a thread runs is local. Memory attached to the other socket is remote and must cross an interconnect.
 
-Local access is faster and has more bandwidth. Remote access adds latency, often a few tens of nanoseconds more, and it shares the interconnect with other remote traffic. The effect is not a sharp failure. A program still runs, but a workload that touches a lot of memory can be noticeably slower when its memory is on the wrong socket.
+Local access is faster and has more bandwidth. Remote access adds latency. It is often a few tens of nanoseconds more. It also shares the interconnect with other remote traffic. The effect is not a sharp failure. A program still runs. But a workload that touches a lot of memory can be noticeably slower when its memory is on the wrong socket.
 
 ```mermaid
 flowchart TB
@@ -117,7 +117,7 @@ flowchart TB
     SocketB -->|local fast| MemB
 ```
 
-The diagram says most of what matters for placement. Threads and the data they touch most often should be on the same socket when possible. An allocator that is NUMA aware allocates from local memory, and a scheduler that is NUMA aware tries to wake a thread on a CPU near its previous memory.
+The diagram shows most of what matters for placement. Threads and the data they touch most often should be on the same socket when possible. A NUMA-aware allocator gives memory from the local node. A NUMA-aware scheduler tries to wake a thread on a CPU near its previous memory.
 
 You can see the topology with `numactl` and `lscpu`.
 
@@ -128,13 +128,13 @@ numactl --cpunodebind=0 --membind=0 go run mem_touch.go
 numactl --cpunodebind=0 --membind=1 go run mem_touch.go
 ```
 
-What it demonstrates is that the same access pattern with the same CPU can have different times when the memory is bound to the local node versus the remote node. The difference is not always large for one access, but it adds up when the workload touches gigabytes. The earlier cache locality article showed how a core likes data that is already close in caches. NUMA adds that some memory is closer in the first place.
+This shows that the same access pattern on the same CPU can take different time when the memory is bound to the local node versus the remote node. The difference is not always large for one access, but it adds up when the workload touches gigabytes. The earlier cache locality article showed how a core likes data that is already close in caches. NUMA adds a new fact: some memory is closer to begin with.
 
-A second exercise measures whether a real program is sensitive. Run the tiny program's larger variant that touches a few hundred megabytes, bind it both ways, and compare `perf stat` for `cycles` and `cache-misses` and wall time. A workload that is limited by memory bandwidth shows a clearer NUMA effect than one that fits in cache.
+A second exercise measures whether a real program is sensitive to NUMA. Run the larger variant of the tiny program that touches a few hundred megabytes. Bind it both ways. Compare perf stat for cycles, cache-misses, and wall time. A workload that is limited by memory bandwidth shows a clearer NUMA effect than one that fits in cache.
 
 ### First-touch, interleaving, and memory policy
 
-On Linux, the node where anonymous memory is allocated is often decided by first touch, which means the CPU that first writes the page determines which node's memory backs it. If the main thread allocates and first touches a large buffer on node 0 and then workers on node 1 use it, the buffer stays on node 0 even though the workers run on node 1. Allocating in the worker that will use the memory, or using `mbind` with `MPOL_BIND` or `MPOL_INTERLEAVE` to spread pages, changes the placement.
+On Linux, the node where anonymous memory is allocated is often decided by first touch. That means the CPU that first writes the page decides which node's memory backs it. Suppose the main thread allocates and first touches a large buffer on node 0. Then workers on node 1 use it. The buffer stays on node 0 even though the workers run on node 1. You can change this by allocating in the worker that will use the memory. You can also use mbind with MPOL_BIND or MPOL_INTERLEAVE to spread pages across nodes.
 
 ```bash
 numactl --membind=0 ./tiny  # all pages on node 0
@@ -143,7 +143,7 @@ numactl --membind=1 --cpunodebind=0 ./tiny  # CPU 0 with remote memory
 cat /proc/<pid>/numa_maps | head
 ```
 
-What it demonstrates is that affinity and memory policy are two different knobs. `cpunodebind` says where the thread runs, `membind` says where its pages come from, and `numa_maps` shows per-mapping counters for `N0` versus `N1`. Huge pages, often 2 MiB, make translation cheaper but make placement coarser, so a huge page that straddles a boundary can keep remote pages longer.
+This shows that affinity and memory policy are two different knobs. cpunodebind says where the thread runs. membind says where its pages come from. numa_maps shows per-mapping counters for N0 versus N1. Huge pages, often 2 MiB, make address translation cheaper. But they make placement coarser. A huge page that straddles a boundary can keep remote pages longer.
 
 ## Load balancing
 
@@ -151,11 +151,11 @@ Load balancing is the kernel's way to keep the machine even. When a new thread b
 
 Balancing is not free. Moving a thread means its cache warmth is lost and its next accesses will miss. Moving a thread that just touched a large buffer can be worse than leaving it where its data is, even if another CPU is a little less loaded. The scheduler therefore balances with thresholds and with awareness of cache domains.
 
-A more application-level balance happens in a worker pool. When tasks are small and arrive quickly, a single shared queue lets any idle worker take the next task, which balances naturally. When tasks are long or need locality, a per-CPU or per-socket queue with stealing can keep data close while still moving work when a queue is empty. Go's own scheduler uses a similar idea for goroutines, with per-processor queues and stealing.
+A more application-level balance happens in a worker pool. When tasks are small and arrive quickly, a single shared queue lets any idle worker take the next task. This balances naturally. When tasks are long or need locality, use a per-CPU or per-socket queue with stealing. This keeps data close and still moves work when a queue is empty. Go's own scheduler uses a similar idea for goroutines. It uses per-processor queues and stealing.
 
 ## Priority inversion
 
-Priority inversion happens when a lower-priority thread holds a resource that a higher-priority thread needs, and a medium-priority thread prevents the lower-priority thread from running and releasing it.
+Priority inversion happens when a lower-priority thread holds a resource that a higher-priority thread needs. A medium-priority thread then prevents the lower-priority thread from running and releasing it.
 
 ```mermaid
 sequenceDiagram
@@ -169,9 +169,9 @@ sequenceDiagram
     Note over Low,High: Low cannot run to release, High waits
 ```
 
-The high-priority thread is ready but cannot make progress because the low-priority holder cannot run. The medium thread, which does not even need the lock, keeps the low thread from being scheduled. The fix is to temporarily raise the holder's priority while it holds the lock, which is called priority inheritance, or to use a lock that is aware of priority, or to avoid the shared lock entirely by moving the data to a channel or a per-CPU structure.
+The high-priority thread is ready but cannot make progress because the low-priority holder cannot run. The medium thread does not even need the lock, but it keeps the low thread from being scheduled. The fix is to temporarily raise the holder's priority while it holds the lock. This is called priority inheritance. You can also use a lock that is aware of priority. Or you can avoid the shared lock entirely by moving the data to a channel or a per-CPU structure.
 
-A simple way to see inversion without writing a priority scheduler is to run a Go program that mimics it with a mutex and three workers that log when they hold the lock.
+To see inversion without writing a priority scheduler, run a Go program that mimics it. Use a mutex and three workers that log when they hold the lock.
 
 ```go
 package main
@@ -214,42 +214,42 @@ func main() {
 }
 ```
 
-What it demonstrates is not a true kernel priority inversion, because Go's scheduler is not a strict priority scheduler, but it shows the ordering problem. The high waiter cannot proceed until the low holder runs, and any other runnable work that keeps the low holder from being scheduled makes the wait longer. In a real kernel with strict priorities, the same pattern would make a deadline miss.
+This does not show a true kernel priority inversion, because Go's scheduler is not a strict priority scheduler. But it shows the ordering problem. The high waiter cannot proceed until the low holder runs. Any other runnable work that keeps the low holder from being scheduled makes the wait longer. In a real kernel with strict priorities, the same pattern would cause a missed deadline.
 
 ## Starvation
 
-Starvation is what happens when a thread that is runnable keeps not being chosen because other threads with higher priority or better balance always win. Fairness in the kernel's complete fair scheduler tries to avoid this by tracking virtual runtime and by periodically considering all runnable threads, but a thread that is given a very low priority or that shares a heavily loaded control group can still see long delays.
+Starvation happens when a runnable thread keeps not being chosen. Other threads with higher priority or better balance always win. The kernel's Completely Fair Scheduler tries to avoid this. It tracks virtual runtime and periodically checks all runnable threads. But a thread that is given a very low priority can still see long delays. So can a thread that shares a heavily loaded control group.
 
-Starvation does not always look like a crash. It can look like high tail latency for one tenant while others are fine, or like a background job that never finishes when the machine is busy. The symptom is that `runnable` time grows while `running` time does not, which you can infer from run queue length and from lock wait time that is actually scheduling wait in disguise.
+Starvation does not always look like a crash. It can look like high tail latency for one tenant while others are fine. It can also look like a background job that never finishes when the machine is busy. The symptom is that runnable time grows while running time does not. You can infer this from run queue length. You can also infer it from lock wait time that is really scheduling wait in disguise.
 
 ## Real-time scheduling
 
-Real-time work has a deadline that is part of correctness, not just performance. A hard real-time system must meet its deadline under its stated conditions, while a soft real-time system tries to meet it but can miss occasionally and recover.
+Real-time work has a deadline that is part of correctness, not just performance. A hard real-time system must meet its deadline under its stated conditions. A soft real-time system tries to meet it but can miss occasionally and recover.
 
-Linux has real-time classes that give stronger priority than the normal fair class. A thread in a real-time class can preempt normal threads and can run until it blocks. That guarantee is useful for work like audio or control loops that must run at a precise time, but it is dangerous when used without care. A real-time thread that loops without blocking can starve not only other applications but also kernel threads that the system needs.
+Linux has real-time classes that give stronger priority than the normal fair class. A thread in a real-time class can preempt normal threads and run until it blocks. That guarantee helps work like audio or control loops that must run at a precise time. But it is dangerous when used without care. A real-time thread that loops without blocking can starve other applications. It can also starve the kernel threads that the system needs.
 
-Real-time behavior also depends on more than the scheduling class. Interrupt handling, page faults, allocations that fault, and locks shared with normal threads all affect whether a deadline is met. Choosing a real-time policy without also pinning the thread, locking its memory so it does not fault, and avoiding blocking on a lock held by a normal thread is incomplete. Tools like `chrt` set the class and priority from the command line, but they do not create a full real-time system by themselves.
+Real-time behavior depends on more than the scheduling class. Interrupt handling, page faults, allocations that fault, and locks shared with normal threads all affect whether a deadline is met. Choosing a real-time policy is not enough. You must also pin the thread, lock its memory so it does not fault, and avoid blocking on a lock held by a normal thread. Tools like chrt set the class and priority from the command line. But they do not create a full real-time system by themselves.
 
 ```bash
 chrt -f 10 ./rt_task
 chrt -r 20 ./rt_task
 ```
 
-What it demonstrates is that the same binary can be started in the normal fair class or in a real-time FIFO or round-robin class with a priority. The real-time instance will preempt the fair instance, which is helpful for the deadline and harmful if the real-time thread is buggy.
+This shows that the same binary can start in the normal fair class or in a real-time FIFO or round-robin class with a priority. The real-time instance will preempt the fair instance. That helps meet the deadline. It is harmful if the real-time thread is buggy.
 
 ### Priority inheritance with futexes
 
-A `pthread_mutex` that is created with `PTHREAD_PRIO_INHERIT` uses the kernel's PI futex. When a higher-priority waiter blocks on the futex, the kernel temporarily raises the holder's priority to that of the waiter until it releases. Without that flag, the holder stays at its normal priority and can be preempted by medium-priority work, which recreates the inversion. A Go `sync.Mutex` does not have kernel priority inheritance, which is why the earlier fix replaced the shared lock with a single owner goroutine and a channel. The kernel primitive exists, but the language runtime may not use it.
+A pthread_mutex created with PTHREAD_PRIO_INHERIT uses the kernel's PI futex. When a higher-priority waiter blocks on the futex, the kernel temporarily raises the holder's priority to match the waiter. It does this until the holder releases. Without that flag, the holder stays at its normal priority. Medium-priority work can then preempt it and recreate the inversion. A Go sync.Mutex does not have kernel priority inheritance. That is why the earlier fix replaced the shared lock with a single owner goroutine and a channel. The kernel primitive exists, but the language runtime may not use it.
 
 ### SCHED_DEADLINE and bandwidth
 
-For stricter deadlines, Linux has `SCHED_DEADLINE`, which is not a fixed priority but a reservation. Each task declares a runtime, a period, and a deadline, and the kernel's `SCHED_DEADLINE` scheduler uses Earliest Deadline First and Constant Bandwidth Server to guarantee that the task gets its runtime every period as long as total reservations fit. A task that exceeds its runtime is throttled until the next period, which contains a real-time loop that would otherwise starve the machine. The tradeoff is that admission control can refuse a new deadline task when the system is already fully reserved, where `SCHED_FIFO` would have let it start and then missed deadlines.
+For stricter deadlines, Linux has SCHED_DEADLINE. It is not a fixed priority but a reservation. Each task declares a runtime, a period, and a deadline. The kernel's SCHED_DEADLINE scheduler uses Earliest Deadline First and Constant Bandwidth Server. It guarantees the task gets its runtime every period as long as the total reservations fit. A task that exceeds its runtime is throttled until the next period. This contains a real-time loop that would otherwise starve the machine. The tradeoff is that admission control can refuse a new deadline task when the system is fully reserved. SCHED_FIFO would have let it start and then missed deadlines.
 
 ```bash
 chrt -d --sched-runtime 5000000 --sched-period 20000000 --sched-deadline 20000000 ./periodic_task
 ```
 
-What it demonstrates is that the task says it needs 5 ms every 20 ms before its deadline, and the kernel decides whether that fits with existing reservations.
+This shows that the task says it needs 5 ms every 20 ms before its deadline. The kernel decides whether that fits with the existing reservations.
 
 ## How to look at affinity and NUMA
 
@@ -263,7 +263,7 @@ numactl --show
 perf stat -e cycles,cache-misses,cpu-migrations ./tiny 2>&1 | head
 ```
 
-What it demonstrates is the boundary between the kernel's view and the application's design. `numactl --hardware` shows which CPUs belong to which node and which memory is local. `taskset` shows the allowed mask. `psr` shows where each thread last ran. `perf` shows whether pinning reduced migrations and whether it hurt or helped.
+This shows the boundary between the kernel's view and the application's design. numactl --hardware shows which CPUs belong to which node and which memory is local. taskset shows the allowed mask. psr shows where each thread last ran. perf shows whether pinning reduced migrations and whether it hurt or helped.
 
 A more complete check adds memory binding.
 
@@ -272,29 +272,29 @@ numactl --cpunodebind=0 --membind=0 ./tiny
 numactl --cpunodebind=0 --membind=1 ./tiny
 ```
 
-The first run keeps memory near the CPU, the second forces remote memory and will usually be slower for a memory-heavy workload.
+The first run keeps memory near the CPU. The second forces remote memory and will usually be slower for a memory-heavy workload.
 
 ## A realistic production example
 
-A team ran a Go service that handled events with a pool of workers. Each worker kept a per-worker buffer of a few megabytes that it reused to avoid allocation. The service ran on a two-socket machine. At first the pool was created with no affinity and no NUMA awareness, and the buffer for each worker was allocated on the node where the worker first ran.
+A team ran a Go service that handled events with a pool of workers. Each worker kept a per-worker buffer of a few megabytes. It reused the buffer to avoid allocation. The service ran on a two-socket machine. At first the pool had no affinity and no NUMA awareness. The buffer for each worker was allocated on the node where the worker first ran.
 
-Under light load the service was fast, because a worker usually ran on the same socket where its buffer lived. Under heavier load the scheduler began to steal workers across sockets to balance. A worker that had built a buffer on node 0 was woken on node 1, and its next batch of events touched that buffer as remote memory. Cache misses rose and `perf` showed more cycles per request. At the same time the workers all updated a shared counter protected by a single mutex, and one low-priority background job that held that mutex was preempted by medium-priority workers, which made the high-priority request path wait longer than expected.
+Under light load the service was fast, because a worker usually ran on the same socket where its buffer lived. Under heavier load the scheduler began to steal workers across sockets to balance. Suppose a worker built a buffer on node 0. It was then woken on node 1. Its next batch of events touched that buffer as remote memory. Cache misses rose and perf showed more cycles per request. At the same time the workers all updated a shared counter protected by one mutex. One low-priority background job held that mutex. It was preempted by medium-priority workers. That made the high-priority request path wait longer than expected.
 
-The team first tried to fix it by pinning all workers to the same socket. Tail latency for the pinned workers improved, but throughput fell because the second socket was idle and latency for traffic that arrived when the pinned socket was busy got worse. They instead made two changes. They partitioned the pool by socket, so a request was handed to a worker on the same socket where its buffer lived, and they replaced the shared counter with per-worker counters that were merged infrequently. For the mutex, they removed the shared state entirely and moved it to a single goroutine that owned the data and received updates through a channel, which removed the priority inversion without needing a special lock.
+The team first tried to fix it by pinning all workers to the same socket. Tail latency for the pinned workers improved. But throughput fell because the second socket was idle. Latency for traffic that arrived when the pinned socket was busy got worse. They instead made two changes. They partitioned the pool by socket. A request went to a worker on the same socket where its buffer lived. They replaced the shared counter with per-worker counters that were merged infrequently. For the mutex, they removed the shared state entirely. They moved it to a single goroutine that owned the data and received updates through a channel. That removed the priority inversion without needing a special lock.
 
-After the changes `numactl --hardware` still showed two nodes, but workers stayed near their memory, coherence traffic fell, and the run queue on each socket stayed short. The machine did the same work with fewer cycles and more predictable latency, not because they added cores, but because they kept work near the memory it touches and removed the single lock that made priority matter.
+After the changes numactl --hardware still showed two nodes. But workers stayed near their memory. Coherence traffic fell. The run queue on each socket stayed short. The machine did the same work with fewer cycles and more predictable latency. This was not because they added cores. It was because they kept work near the memory it touches and removed the single lock that made priority matter.
 
 ## How engineers actually reason about scheduling
 
-They start with whether the machine is balanced and where memory lives. Is one socket much busier than the other, is one run queue longer, are many threads migrating, and is the workload's working set near the CPUs that run it.
+They start by asking whether the machine is balanced and where memory lives. Is one socket much busier than the other? Is one run queue longer? Are many threads migrating? Is the workload's working set near the CPUs that run it?
 
-Then they decide whether the fix is to let the scheduler do more or less. Allowing wide affinity and relying on the scheduler's cache-aware placement is right when the workload has little per-thread state. Narrowing affinity or partitioning per socket is right when each worker reuses a large buffer or a per-CPU structure and the cost of moving is larger than the benefit of perfect balance.
+Then they decide whether the fix is to let the scheduler do more or less. Allowing wide affinity and relying on the scheduler's cache-aware placement is right when the workload has little per-thread state. Narrowing affinity or partitioning per socket is right when each worker reuses a large buffer or a per-CPU structure. It also helps when the cost of moving is larger than the benefit of perfect balance.
 
-For priority they ask whether the shared resource can be removed. A lock that must be held across a priority boundary is a design risk. If it must stay, they use priority inheritance where available or make the holder very short, so inversion cannot last long. For real-time they check the whole path, not just the scheduling class, including page faults, interrupts, and locks.
+For priority they ask whether the shared resource can be removed. A lock that must be held across a priority boundary is a design risk. If it must stay, they use priority inheritance where available. Or they make the holder run very briefly so inversion cannot last long. For real-time they check the whole path, not just the scheduling class. This includes page faults, interrupts, and locks.
 
 ## Interrupt affinity and IRQ balancing
 
-A thread does not only compete with other threads for a CPU. It also competes with the interrupts the CPU services. Every device, including the network card, disk controller, and timers, raises an interrupt on a CPU to say data arrived or work is due. The kernel's `irqbalance` daemon spreads these across CPUs by default, but the CPU that handles a device's interrupt runs the handler and may cache the device's data structures, which means a thread that processes that data benefits from running on the same CPU as its interrupt.
+A thread does not only compete with other threads for a CPU. It also competes with the interrupts that the CPU services. Every device raises an interrupt on a CPU to say data arrived or work is due. This includes the network card, disk controller, and timers. The kernel's irqbalance daemon spreads these across CPUs by default. But the CPU that handles a device's interrupt also runs the handler. It may cache the device's data structures. A thread that processes that data benefits from running on the same CPU as its interrupt.
 
 ```mermaid
 flowchart LR
@@ -305,25 +305,25 @@ flowchart LR
     App2[App thread on CPU 1] --> D2[Cold cache, remote access]
 ```
 
-The mapping is visible and adjustable. Each interrupt has an entry under `/proc/irq/<num>/smp_affinity` that is a bitmask of allowed CPUs, and `cat /proc/interrupts` shows how many times each IRQ fired on each CPU. For latency-sensitive network work it is common to pin the application threads that handle a queue to the same CPU that services that queue's NIC interrupt, or conversely to move interrupts off the CPUs reserved for latency-critical work so they are not disturbed. Either way, understanding which CPU serves which device is part of understanding the thread's real environment.
+The mapping is visible and adjustable. Each interrupt has an entry under /proc/irq/<num>/smp_affinity. That entry is a bitmask of allowed CPUs. The command cat /proc/interrupts shows how many times each IRQ fired on each CPU. For latency-sensitive network work it is common to pin the application threads that handle a queue to the same CPU that services that queue's NIC interrupt. The opposite is also done. Move interrupts off the CPUs reserved for latency-critical work so they are not disturbed. Either way, understanding which CPU serves which device is part of understanding the thread's real environment.
 
 ## Hyperthreading, SMT, and CPU siblings
 
-On many CPUs each physical core exposes two logical CPUs, called hardware threads or SMT siblings, that share the core's execution units, caches, and translation lookaside buffer. To the scheduler and to `taskset` they look like two separate CPUs, but they are not independent: two busy siblings compete for the same pipelines and for cache capacity, so two CPU-bound threads placed on the same core may each get only part of the core's throughput, while two threads placed on different cores get full execution units.
+On many CPUs each physical core exposes two logical CPUs. These are called hardware threads or SMT siblings. They share the core's execution units, caches, and translation lookaside buffer. To the scheduler and to taskset they look like two separate CPUs. But they are not independent. Two busy siblings compete for the same pipelines and for cache capacity. So two CPU-bound threads placed on the same core may each get only part of the core's throughput. Two threads placed on different cores get full execution units.
 
-The relationship is visible with `lscpu`, which prints `Thread(s) per core` and a `CPU:CORE` mapping, or `cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list`. For some workloads you want siblings together, for example two threads that share cache and communicate a lot, and for others you want them apart, for example two latency-critical threads that each want the whole core. Knowing the topology is the prerequisite for any affinity decision, because pinning two heavy threads to CPU 0 and CPU 1 may put them on the same core while CPU 2 and CPU 3 are a different core entirely.
+You can see this with lscpu. It prints Thread(s) per core and a CPU:CORE mapping. You can also use cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list. For some workloads you want siblings together. This fits two threads that share cache and communicate a lot. For others you want them apart. This fits two latency-critical threads that each want the whole core. Knowing the topology is the prerequisite for any affinity decision. Suppose you pin two heavy threads to CPU 0 and CPU 1. That may put them on the same core while CPU 2 and CPU 3 are a different core entirely.
 
 ## CPU power management: governors, P-states, and C-states
 
-The CPU does not always run at its maximum frequency, and it does not always stay awake. The `cpufreq` subsystem chooses a P-state, a frequency and voltage level, according to a governor: `powersave` favors low frequency to save energy, `performance` favors the highest frequency even at idle, and `schedutil` scales with load. A latency-sensitive service may see noticeable delay under `powersave` if it waits for the frequency to ramp up, which is why production servers are often set to `performance`.
+The CPU does not always run at its maximum frequency, and it does not always stay awake. The cpufreq subsystem chooses a P-state, which is a frequency and voltage level. It picks based on a governor. powersave favors low frequency to save energy. performance favors the highest frequency even at idle. schedutil scales with load. A latency-sensitive service may see noticeable delay under powersave if it waits for the frequency to ramp up. That is why production servers are often set to performance.
 
-The deeper effect is C-states, which put a core to sleep to save power when idle. A core in a deep C-state takes longer to wake, adding jitter to the latency of the first request after a quiet period. Real-time and low-latency work often disable deep C-states in the BIOS or via `intel_idle.max_cstate` so the CPU stays responsive, trading power for predictability. Both knobs are outside the scheduler but change what the scheduler can deliver, which is why a sudden latency regression is sometimes a power setting, not a code change.
+The deeper effect is C-states, which put a core to sleep to save power when idle. A core in a deep C-state takes longer to wake. This adds jitter to the latency of the first request after a quiet period. Real-time and low-latency work often disable deep C-states in the BIOS or via intel_idle.max_cstate. This keeps the CPU responsive and trades power for predictability. Both knobs are outside the scheduler, but they change what the scheduler can deliver. That is why a sudden latency regression is sometimes a power setting, not a code change.
 
 ## Carving out CPUs with isolcpus and nohz_full
 
-Pinning a thread restricts where it may run, but the scheduler can still place other tasks and housekeeping work on that CPU. The kernel boot parameters `isolcpus` and `nohz_full` go further: `isolcpus` removes the listed CPUs from the scheduler's normal balancing so only tasks explicitly pinned there will run, and `nohz_full` stops the periodic timer tick on those CPUs so a pinned thread is not interrupted by the system timer. This is the setup behind low-latency systems such as DPDK packet processing, where a CPU is dedicated to one task and must not be disturbed.
+Pinning a thread restricts where it may run, but the scheduler can still place other tasks and housekeeping work on that CPU. The kernel boot parameters isolcpus and nohz_full go further. isolcpus removes the listed CPUs from the scheduler's normal balancing. Only tasks explicitly pinned there will run. nohz_full stops the periodic timer tick on those CPUs so a pinned thread is not interrupted by the system timer. This is the setup behind low-latency systems such as DPDK packet processing. A CPU is dedicated to one task and must not be disturbed.
 
-The cost is that those CPUs do not automatically run other work, so the machine has fewer CPUs for general use, and housekeeping such as RCU callbacks and timers must run on the non-isolated CPUs. It is a deliberate, whole-machine decision, not something to set per thread, and it only pays off for a workload that truly needs a quiet, predictable core.
+The cost is that those CPUs do not automatically run other work. The machine has fewer CPUs for general use. Housekeeping such as RCU callbacks and timers must run on the non-isolated CPUs. This is a deliberate, whole-machine decision, not something to set per thread. It only pays off for a workload that truly needs a quiet, predictable core.
 
 ## Definitions
 
@@ -387,4 +387,4 @@ The cost is that those CPUs do not automatically run other work, so the machine 
 
 ## Summary
 
-Scheduling chooses which runnable thread runs on which CPU, affinity restricts where a thread may run, and NUMA says which memory is near which CPU. Load balancing moves work to keep the machine even, pinning keeps work near its data, and the two can conflict. Priority inversion, starvation, and real-time deadlines are the failure modes that appear when priority and placement are chosen poorly. The right choice is not a fixed rule about pinning or priority. It is where the working set lives, how long a thread holds a shared resource, and whether moving work helps balance more than it hurts locality.
+Scheduling chooses which runnable thread runs on which CPU. Affinity restricts where a thread may run. NUMA says which memory is near which CPU. Load balancing moves work to keep the machine even. Pinning keeps work near its data. The two can conflict. Priority inversion, starvation, and missed real-time deadlines are the failure modes that appear when priority and placement are chosen poorly. The right choice is not a fixed rule about pinning or priority. It depends on where the working set lives, how long a thread holds a shared resource, and whether moving work helps balance more than it hurts locality.

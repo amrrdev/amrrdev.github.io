@@ -10,33 +10,33 @@ stage_order: 1
 series_order: 6
 ---
 
-This is the sixth chapter in the Systems Programming Foundations arc. The earlier chapters showed how performance and failure depend on the resources and behavior of the system underneath your code. This chapter adds a complication: that behavior is not identical everywhere. The same program can mean different things on a different operating system, a different CPU, a different compiler, or a different version of a library.
+This is the sixth chapter in the Systems Programming Foundations arc. The earlier chapters showed how speed and failures depend on the system under your code. This chapter adds a problem. That system does not behave the same everywhere. The same program can act differently on another operating system, another CPU, another compiler, or another version of a library.
 
-Portability and compatibility are the disciplines that keep software honest across those differences. They are not final cleanup steps you do at the end. They influence design from the first line, because the assumptions you bake in early are the ones that break later.
+Portability and compatibility are the habits that keep software working across those differences. They are not cleanup steps you do at the end. They affect design from the first line. The assumptions you set early are the ones that break later.
 
-This chapter is about finding those assumptions, naming them, and putting them behind boundaries you can test. It is also about abstraction leaks: the moments when a detail you thought was hidden shows up and changes what your program does.
+This chapter is about finding those assumptions, naming them, and putting them behind boundaries you can test. It is also about abstraction leaks. These are moments when a detail you thought was hidden shows up and changes what your program does.
 
 ## Portability and compatibility are about assumptions
 
-Software rarely runs in exactly the environment where it was first written. It may move from one operating system to another, from x86-64 to ARM64, from one compiler version to another, or from one library release to a newer one.
+Software rarely runs in the exact environment where it was first written. It may move from one operating system to another, from x86-64 to ARM64, from one compiler version to another, or from one library release to a newer one.
 
-Portability is the ability to run software in different environments. Compatibility is the ability of different versions or components to keep working together. An abstraction leak occurs when a detail hidden by an interface becomes visible because it affects the software's behavior.
+Portability is the ability to run software in different environments. Compatibility is the ability of different versions or parts to keep working together. An abstraction leak happens when a detail that an interface hides becomes visible because it changes how the software behaves.
 
-These problems usually grow from assumptions. The code assumes a path separator, a data size, a byte order, a syscall, a filesystem behavior, a compiler rule, a library symbol, or a protocol field. The assumption may hold in the original environment and fail somewhere else.
+These problems usually start with assumptions. The code assumes a path separator, a data size, a byte order, a syscall, a filesystem behavior, a compiler rule, a library symbol, or a protocol field. The assumption may be true in the original environment and false somewhere else.
 
 The habit worth building is:
 
-> Make important environmental assumptions explicit, isolate them behind clear boundaries, and test the boundaries where the environment can change.
+> Make your important environment assumptions clear, keep them behind clear boundaries, and test those boundaries where the environment can change.
 
 ## Portability and compatibility are not the same
 
 Portability asks whether the same software can run in different environments. The environment may differ by operating system, CPU architecture, compiler, runtime, filesystem, or cloud platform.
 
-Compatibility asks whether two versions or components can keep working together. The components may be two versions of an API, a client and a server, a program and a shared library, or a database and an application.
+Compatibility asks whether two versions or parts can keep working together. The parts may be two versions of an API, a client and a server, a program and a shared library, or a database and an application.
 
 A system can be portable but not compatible. A program may compile on both Linux and Windows, yet a new version of its file format may break older clients.
 
-A system can be compatible but not portable. A service may preserve its network API across versions while only running on one operating system.
+A system can be compatible but not portable. A service may keep its network API the same across versions while running on only one operating system.
 
 ```rs
 Portability
@@ -46,11 +46,11 @@ Compatibility
     Different versions or components continuing to work together
 ```
 
-The distinction matters because the solutions differ. Portability often requires isolating environment-specific behavior. Compatibility often requires versioning, stable contracts, migration paths, and careful changes.
+The difference matters because the fixes differ. Portability often means isolating behavior that depends on the environment. Compatibility often means versioning, stable contracts, migration paths, and careful changes.
 
 ## The environment is part of the program
 
-Source code is not the complete input to a running program. The result also depends on the compiler, linker, libraries, runtime, operating system, CPU architecture, configuration, filesystem, environment variables, clock, locale, and external services.
+Source code is not the only input to a running program. The result also depends on the compiler, linker, libraries, runtime, operating system, CPU architecture, configuration, filesystem, environment variables, clock, locale, and external services.
 
 ```mermaid
 flowchart TB
@@ -65,11 +65,11 @@ flowchart TB
     Runtime -. assumptions .-> OS
 ```
 
-Two machines can run the same source code and produce different behavior because one of these inputs changed. Sometimes the difference is a compile error. Sometimes it is a different result. The most dangerous case is behavior that looks correct until a rare input or failure arrives.
+Two machines can run the same source code and act differently because one of these inputs changed. Sometimes the difference is a compile error. Sometimes it is a different result. The worst case is behavior that looks correct until a rare input or failure arrives.
 
 ## Operating-system differences
 
-Operating systems expose similar ideas through different interfaces. They all have processes, files, memory, and networking, but the details and guarantees differ.
+Operating systems show similar ideas through different interfaces. They all have processes, files, memory, and networking, but the details and guarantees differ.
 
 Examples include:
 
@@ -84,9 +84,9 @@ Examples include:
 - Shared-library formats
 - Service managers
 
-An application that uses a high-level standard library may avoid many of these differences. A systems program that needs process groups, filesystem notifications, direct I/O, or kernel tracing may need platform-specific code.
+An application that uses a high-level standard library may avoid many of these differences. A systems program that needs process groups, filesystem notifications, direct I/O, or kernel tracing may need code written for a specific platform.
 
-The goal is not to pretend that operating systems are identical. The goal is to place the differences in a small, clear part of the program instead of spreading them across every component.
+The goal is not to pretend that operating systems are the same. The goal is to put the differences in a small, clear part of the program instead of spreading them across every component.
 
 ```mermaid
 flowchart LR
@@ -96,11 +96,11 @@ flowchart LR
     Interface --> Windows[Windows implementation]
 ```
 
-This structure lets most of the program use one stable model while the platform interface handles the differences explicitly.
+This structure lets most of the program use one stable model while the platform interface handles the differences openly.
 
 ## CPU architecture differences
 
-A CPU architecture defines the instructions a processor understands and the important rules about registers, memory access, alignment, and data representation. The common server architectures are x86-64 and ARM64.
+A CPU architecture defines the instructions a processor understands and the important rules about registers, memory access, alignment, and how data is stored. The common server architectures are x86-64 and ARM64.
 
 Most application code does not need to know individual CPU instructions. It still depends on architecture details through:
 
@@ -113,17 +113,17 @@ Most application code does not need to know individual CPU instructions. It stil
 - Compiler-generated code
 - Available vector instructions
 
-Endianness describes the order in which the bytes of a multi-byte value are stored. In little-endian representation, the least significant byte is stored first. In big-endian representation, the most significant byte is stored first.
+Endianness describes the order in which the bytes of a multi-byte value are stored. In little-endian storage, the least significant byte comes first. In big-endian storage, the most significant byte comes first.
 
-If a program writes a multi-byte integer directly to a file or network connection, the reader needs to know the byte order. Otherwise the same bytes can represent different values on different systems.
+If a program writes a multi-byte integer directly to a file or network connection, the reader must know the byte order. Otherwise the same bytes can mean different values on different systems.
 
-Alignment describes where a value may be placed in memory. Some architectures allow unaligned access with a performance cost. Others may reject it or require special instructions. Code that assumes every address can hold every type may work on one architecture and fail on another.
+Alignment describes where a value may be placed in memory. Some architectures allow unaligned access but pay a speed cost. Others may reject it or need special instructions. Code that assumes every address can hold every type may work on one architecture and fail on another.
 
 ## Data representation crosses a boundary
 
-Data must have an agreed representation when it crosses a process, machine, or version boundary. The representation must define field sizes, byte order, encoding, alignment, optional fields, and error behavior.
+Data must have an agreed form when it crosses a process, machine, or version boundary. That form must define field sizes, byte order, encoding, alignment, optional fields, and error behavior.
 
-Writing an in-memory object directly to disk or across the network is often unsafe, because the in-memory layout may contain padding or architecture-specific details.
+Writing an in-memory object directly to disk or across the network is often unsafe, because the in-memory layout may contain padding or details specific to one architecture.
 
 Consider this C structure:
 
@@ -134,7 +134,7 @@ struct Header {
 };
 ```
 
-A programmer might be tempted to write the structure's raw bytes to a file. The compiler may insert padding between the fields so that `payload_length` is aligned. The total size may differ between compilers or architectures. The byte order may also differ.
+A programmer might want to write the structure's raw bytes to a file. The compiler may insert padding between the fields so that `payload_length` is aligned. The total size may differ between compilers or architectures. The byte order may also differ.
 
 The safer design defines a wire or file format explicitly:
 
@@ -144,19 +144,19 @@ Bytes 2-5: payload length, unsigned 32-bit integer, big-endian
 Bytes 6-n: payload bytes
 ```
 
-The encoder writes each field according to that definition. The decoder reads the defined number of bytes and validates the values before using them.
+The encoder writes each field according to that definition. The decoder reads the defined number of bytes and checks the values before using them.
 
 This costs a small amount of code, but it creates a stable boundary. The file or message format no longer depends on the compiler's private memory layout.
 
 ## Source and binary compatibility
 
-Source compatibility means that existing source code can still be compiled against a newer version of a library or interface. A change to a function name or type may break source compatibility even when the underlying binary behavior could have stayed similar.
+Source compatibility means that existing source code can still be compiled against a newer version of a library or interface. A change to a function name or type may break source compatibility even when the compiled binary could have kept behaving the same.
 
-Binary compatibility means that an already-compiled program can continue to run with a newer library or component. The function symbols, calling conventions, data layouts, and runtime expectations must remain compatible.
+Binary compatibility means that an already-compiled program can keep running with a newer library or component. The function symbols, calling rules, data layouts, and runtime expectations must stay compatible.
 
-These are different. A library may preserve binary compatibility while changing a source-level declaration. It may also preserve source compatibility while changing a binary layout in a way that breaks already-compiled programs.
+These are different. A library may keep binary compatibility while changing a source-level declaration. It may also keep source compatibility while changing a binary layout in a way that breaks already-compiled programs.
 
-An ABI, or application binary interface, defines the low-level rules that compiled components use to communicate. It includes calling conventions, data layout, symbol names, register usage, stack layout, and object formats.
+An ABI, or application binary interface, defines the low-level rules that compiled components use to talk to each other. It includes calling rules, data layout, symbol names, register usage, stack layout, and object formats.
 
 An API, or application programming interface, is the source-level contract that programmers use. An ABI is the lower-level contract that compiled code depends on.
 
@@ -172,7 +172,7 @@ An API change may require recompiling clients. An ABI change may break clients e
 
 ## Compatibility is a promise with a scope
 
-When engineers say that an interface is backward compatible, the statement needs a scope.
+When engineers say that an interface is backward compatible, the claim needs a scope.
 
 It may mean:
 
@@ -183,15 +183,15 @@ It may mean:
 - An already-compiled program still loads a shared library.
 - A configuration file continues to parse.
 
-These guarantees are not identical. A change can preserve one direction and break another.
+These guarantees are not identical. A change can keep one direction working and break another.
 
-For example, adding an optional response field may be safe for clients that ignore unknown fields. Removing a field may break clients that require it. Changing the meaning of an existing field can be more dangerous than adding a new field, because old clients may keep running while interpreting the value incorrectly.
+For example, adding an optional response field may be safe for clients that ignore unknown fields. Removing a field may break clients that need it. Changing the meaning of an existing field can be worse than adding a new field, because old clients may keep running while reading the value the wrong way.
 
 Compatibility should therefore be described in terms of producers, consumers, versions, and directions.
 
 ## Versioning and evolution
 
-Systems change over time. A protocol, file format, API, database schema, or configuration format needs a way to evolve without forcing every component to change at exactly the same moment.
+Systems change over time. A protocol, file format, API, database schema, or configuration format needs a way to grow without forcing every component to change at exactly the same moment.
 
 Common techniques include:
 
@@ -218,13 +218,13 @@ sequenceDiagram
     Note over Server: Translate or support both formats
 ```
 
-The compatibility window is temporary. Supporting old behavior forever increases code and testing cost. A responsible migration includes a plan for measuring old usage, communicating a deadline, moving consumers, and eventually removing the old path.
+The compatibility window is temporary. Supporting old behavior forever raises code and testing cost. A responsible migration includes a plan for measuring old usage, stating a deadline, moving consumers, and eventually removing the old path.
 
 ## Configuration is also an interface
 
-Engineers often treat configuration as separate from compatibility, but configuration is an input contract. Environment variables, command-line flags, YAML files, database settings, and feature flags are all interfaces between operators and software.
+Engineers often treat configuration as separate from compatibility, but configuration is an input contract. Environment variables, command-line flags, YAML files, database settings, and feature flags are all interfaces between the people who run the software and the software itself.
 
-Changing a default can change behavior without changing the code. Renaming a configuration key can prevent a service from starting. Changing the meaning of a timeout can make a service retry too aggressively or wait too long.
+Changing a default can change behavior without changing the code. Renaming a configuration key can stop a service from starting. Changing the meaning of a timeout can make a service retry too often or wait too long.
 
 Good configuration design defines:
 
@@ -235,11 +235,11 @@ Good configuration design defines:
 - What happens when it is missing or invalid
 - Whether old names remain supported
 
-Configuration should fail clearly when a dangerous value is invalid. Silently accepting an unknown key can create a false sense that an important setting is active.
+Configuration should fail clearly when a dangerous value is invalid. Silently accepting an unknown key can make you think an important setting is active when it is not.
 
 ## Filesystem abstractions leak
 
-A high-level file API may make every file look like a sequence of bytes, but filesystem behavior can still affect the program.
+A high-level file API may make every file look like a stream of bytes, but filesystem behavior can still affect the program.
 
 Important differences include:
 
@@ -254,29 +254,29 @@ Important differences include:
 - Flush and durability behavior
 - Local versus network filesystem behavior
 
-A test may pass on a case-sensitive Linux filesystem and fail on a case-insensitive development machine because two filenames differ only by case. A program may assume that renaming a file is immediately durable when the filesystem only guarantees atomic visibility, not persistence after power loss.
+A test may pass on a case-sensitive Linux filesystem and fail on a case-insensitive development machine because two filenames differ only by case. A program may assume that renaming a file is immediately durable, while the filesystem only guarantees that the new name appears at once, not that the change survives a power loss.
 
-The file abstraction remains useful. The engineer must identify which filesystem properties the application actually depends on, and document or enforce them.
+The file abstraction is still useful. The engineer must find which filesystem properties the application really depends on, and document or enforce them.
 
 ## Network abstractions leak
 
 A network client may expose a simple function such as `Get(url)`, but the call crosses several boundaries: DNS, routing, connection setup, TLS, server queueing, application processing, and response transfer.
 
-The abstraction leaks when any of those details affect behavior. A DNS cache can return an old address. A connection pool can be exhausted. A certificate can expire. A proxy can impose a request limit. A remote server can complete the operation after the client timeout.
+The abstraction leaks when any of those details affect behavior. A DNS cache can return an old address. A connection pool can run out. A certificate can expire. A proxy can set a request limit. A remote server can finish the work after the client has already given up.
 
-This does not mean every application must understand every packet. It means the system should know which assumptions matter. A latency-sensitive service may need connection reuse and deadlines. A security-sensitive client must validate certificates. A long-lived connection may need keep-alive and reconnect behavior.
+This does not mean every application must understand every packet. It means the system should know which assumptions matter. A service that cares about speed may need connection reuse and deadlines. A security-sensitive client must check certificates. A long-lived connection may need keep-alive and reconnect behavior.
 
 ## Runtime abstractions leak
 
 Language runtimes provide useful services such as memory management, scheduling, networking, reflection, and garbage collection. They also have behavior that can affect a program.
 
-A garbage collector may use CPU and pause or slow application work. An asynchronous runtime may schedule tasks cooperatively, meaning one task that does not yield can delay others. A runtime's network API may buffer data or impose a particular cancellation model.
+A garbage collector may use CPU and pause or slow application work. An asynchronous runtime may schedule tasks cooperatively, which means one task that does not yield can delay the others. A runtime's network API may buffer data or use a particular cancellation model.
 
-The right response is not to avoid runtimes. It is to understand the parts that affect the requirements. If a service has strict latency goals, measure runtime pauses and allocation behavior. If a program performs blocking work inside an event loop, understand how that blocks unrelated tasks.
+The right response is not to avoid runtimes. It is to understand the parts that affect your requirements. If a service has strict speed goals, measure runtime pauses and allocation behavior. If a program does blocking work inside an event loop, understand how that blocks unrelated tasks.
 
 ## Portability through boundaries
 
-Portable systems usually separate stable logic from environment-specific behavior.
+Portable systems usually keep stable logic separate from behavior that depends on the environment.
 
 For example, a storage engine may define an internal interface:
 
@@ -286,17 +286,17 @@ write(block_number, bytes)
 flush()
 ```
 
-One implementation may use a local file. Another may use a block device or a remote storage service. The storage engine's higher-level logic can remain stable if the implementations provide the required guarantees.
+One implementation may use a local file. Another may use a block device or a remote storage service. The storage engine's higher-level logic can stay stable if the implementations provide the required guarantees.
 
-The boundary must describe behavior, not only function names. It should specify whether reads can be partial, whether writes are durable after return, whether operations are thread-safe, and what errors can occur.
+The boundary must describe behavior, not just function names. It should say whether reads can be partial, whether writes are durable after return, whether operations are thread-safe, and what errors can occur.
 
-An interface that hides the wrong details creates surprises. An interface that exposes every platform-specific detail destroys portability. Good interface design chooses the smallest set of guarantees that the higher-level component truly needs.
+An interface that hides the wrong details creates surprises. An interface that exposes every platform-specific detail destroys portability. Good interface design picks the smallest set of guarantees that the higher-level component truly needs.
 
 ## Feature detection and capability negotiation
 
 Portable software should not assume that every environment supports every feature. It can detect capabilities or negotiate them.
 
-Feature detection asks the local environment what it supports. Capability negotiation allows two communicating components to choose a common set of features.
+Feature detection asks the local environment what it supports. Capability negotiation lets two communicating components pick a common set of features.
 
 For example, a client and server may negotiate compression or a protocol version. A program may check whether a filesystem supports a particular operation before using it. A compiler may expose a feature flag for a CPU instruction set.
 
@@ -304,7 +304,7 @@ A capability is not the same as a version number. Two systems with the same vers
 
 ## Portability is not the lowest common denominator
 
-Portable software does not need to use only the weakest feature available everywhere. It can have a portable base and optional optimized paths.
+Portable software does not need to use only the weakest feature available everywhere. It can have a portable base and optional faster paths.
 
 ```mermaid
 flowchart TD
@@ -315,23 +315,23 @@ flowchart TD
     Specialized --> Result
 ```
 
-The optimized path must preserve the required behavior and have tests. If it is not available or fails, the portable path should remain correct.
+The optimized path must keep the required behavior and have tests. If it is not available or fails, the portable path should still be correct.
 
-This pattern lets software use hardware acceleration, platform-specific filesystem features, or specialized system calls without making those features a requirement for every environment.
+This pattern lets software use hardware acceleration, platform-specific filesystem features, or specialized system calls without making those features required in every environment.
 
 ## A realistic example
 
-Imagine a service that stores a small binary record on disk. It works correctly on a developer's laptop and on the first production machines. The company later moves part of the workload to ARM64 machines and discovers that some records cannot be read.
+Imagine a service that stores a small binary record on disk. It works correctly on a developer's laptop and on the first production machines. The company later moves part of the workload to ARM64 machines and finds that some records cannot be read.
 
-The service had written an in-memory C structure directly to disk. The structure contained compiler-inserted padding, and the code assumed a particular byte order. The file format had never defined either property.
+The service had written an in-memory C structure directly to disk. The structure contained padding inserted by the compiler, and the code assumed a particular byte order. The file format had never defined either property.
 
 The short-term fix is to write a reader that can detect and convert the old format. The long-term fix is to define an explicit format with field sizes, byte order, versioning, and validation. New records use the stable format, while old records are migrated or supported during a compatibility window.
 
-The original code was not obviously wrong on its first machine. The problem was that an environment assumption had become an undocumented file-format contract.
+The original code was not clearly wrong on its first machine. The problem was that an environment assumption had turned into an undocumented file-format contract.
 
 ## How engineers actually handle compatibility changes
 
-When changing a public interface, experienced engineers consider the consumers they do not control directly.
+When changing a public interface, experienced engineers think about the consumers they do not control directly.
 
 They ask:
 
@@ -345,13 +345,13 @@ They ask:
 - How will the change be rolled back?
 - When can the old behavior be removed?
 
-This is why additive changes are often safer than replacement changes. A new optional field can be introduced, populated, observed, and eventually made required. Removing an old field immediately forces coordination across all consumers.
+This is why additive changes are often safer than replacement changes. A new optional field can be added, filled in, watched, and eventually made required. Removing an old field at once forces coordination across all consumers.
 
 Compatibility work is partly technical and partly organizational. The system may be correct while the migration still fails because a team did not know that its client depended on the old behavior.
 
 ## How to investigate a portability problem
 
-When software behaves differently in another environment, compare assumptions systematically.
+When software behaves differently in another environment, compare the assumptions step by step.
 
 Check:
 
@@ -366,7 +366,7 @@ Check:
 9. Available CPU, memory, storage, and network features
 10. External service versions and responses
 
-Then reduce the problem to the smallest difference that changes the result. A small compatibility test is more valuable than a general claim that the platforms behave differently.
+Then reduce the problem to the smallest difference that changes the result. A small compatibility test is more useful than a general claim that the platforms behave differently.
 
 ## Definitions
 
@@ -428,11 +428,11 @@ Then reduce the problem to the smallest difference that changes the result. A sm
 
 ### "If it compiles on two platforms, it is portable."
 
-Compilation proves only that the source can be built in those environments. Runtime behavior, performance, permissions, filesystem semantics, timing, and failure behavior may still differ.
+Compilation only proves that the source can be built in those environments. Runtime behavior, performance, permissions, filesystem semantics, timing, and failure behavior may still differ.
 
 ### "Backward compatibility means old clients always work forever."
 
-Compatibility is a defined promise with a scope and often a time period. Supporting old behavior forever can create growing complexity, so migrations need clear ownership and removal plans.
+Compatibility is a defined promise with a scope and often a time period. Supporting old behavior forever can create growing complexity, so migrations need clear ownership and a plan to remove the old path.
 
 ### "An API is only a set of function names."
 
@@ -440,16 +440,16 @@ An API also includes data meanings, error behavior, ordering, limits, timing exp
 
 ### "Abstraction leaks mean the abstraction failed."
 
-Abstractions are valuable even when lower-level behavior sometimes matters. A leak simply means that the hidden detail affects an observable requirement and must be understood for that situation.
+Abstractions are useful even when lower-level behavior sometimes matters. A leak simply means that the hidden detail affects a requirement you can observe, and you must understand it for that situation.
 
 ### "Using platform-specific code is always bad."
 
-Platform-specific code can be appropriate when it provides an important capability or performance improvement. The risk comes from scattering it through the system without a clear boundary and fallback behavior.
+Platform-specific code can be right when it provides an important capability or performance gain. The risk comes from spreading it through the system without a clear boundary and fallback behavior.
 
 ## Summary
 
-Portability is about running across environments. Compatibility is about allowing different versions and components to continue working together. Both depend on making assumptions explicit.
+Portability is about running across environments. Compatibility is about allowing different versions and components to keep working together. Both depend on making assumptions explicit.
 
-Operating systems, CPU architectures, filesystems, compilers, runtimes, configurations, and external services can all change the behavior of software. Stable systems isolate environmental differences, define data formats explicitly, version interfaces carefully, and test the boundaries where assumptions can fail.
+Operating systems, CPU architectures, filesystems, compilers, runtimes, configurations, and external services can all change how software behaves. Stable systems isolate environmental differences, define data formats explicitly, version interfaces carefully, and test the boundaries where assumptions can fail.
 
-The goal is not to hide every difference or support every platform. The goal is to know which differences matter, contain them in clear interfaces, and evolve systems without surprising the components that depend on them.
+The goal is not to hide every difference or support every platform. The goal is to know which differences matter, keep them inside clear interfaces, and evolve systems without surprising the components that depend on them.

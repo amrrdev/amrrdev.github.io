@@ -10,25 +10,25 @@ stage_order: 1
 series_order: 4
 ---
 
-This is the fourth chapter in the Systems Programming Foundations arc. The earlier chapters described what systems programming is, how the machine presents its resources, and what it means to own or borrow one of them. Now we reach the part that makes this kind of code feel different from ordinary application work: things go wrong.
+This is the fourth chapter in the Systems Programming Foundations arc. The earlier chapters explained what systems programming is, how the machine offers its resources, and what it means to own or borrow one of them. Now we reach the part that makes this code feel different from ordinary application work. Things go wrong.
 
-A file is missing. A connection closes before the reply arrives. A process dies halfway through its work. A lock is held by a thread that no longer exists. None of these are unusual events. They are the ordinary weather of a running system, and a system is only as reliable as the decisions it makes when they happen.
+A file may be missing. A connection may close before the reply arrives. A process may die halfway through its work. A lock may be held by a thread that no longer exists. None of these are unusual. They are normal events in a running system. A system is only as reliable as the choices it makes when they happen.
 
-This chapter is about those decisions. We look at the ways an operation can fail, why a timeout is not the same as an error, how partial work leaves a system in an awkward state, and what makes retrying safe instead of dangerous. Then we turn to determinism, because the easier a failure is to reproduce, the easier it is to fix. We end with the question of control: how much of the machinery you want to hand to a runtime, and how much you want to own yourself.
+This chapter is about those choices. We look at the ways an operation can fail. We explain why a timeout is not the same as an error. We show how partial work leaves a system in an awkward state. We explain what makes retrying safe instead of dangerous. Then we turn to determinism, because a failure is easier to fix when it is easier to reproduce. We end with the question of control. How much of the machinery do you want to hand to a runtime, and how much do you want to own yourself?
 
-## The idea at the center of this chapter
+## The main idea of this chapter
 
-Systems do not run in a world where every operation succeeds, finishes on time, and happens in a predictable order. Files disappear, memory runs short, connections close, processes crash, devices return errors, and concurrent operations change the order in which events are observed.
+Systems do not run in a world where every operation succeeds, finishes on time, and happens in a predictable order. Files disappear. Memory runs short. Connections close. Processes crash. Devices return errors. Concurrent operations change the order in which events are observed.
 
-Systems engineering is partly the work of deciding what should happen in those situations. A reliable system does not eliminate every failure. It recognizes the failure modes that matter, limits their impact, makes recovery possible, and gives engineers enough evidence to understand what happened afterward.
+Systems engineering is partly the work of deciding what should happen in those situations. A reliable system does not prevent every failure. It recognizes the failures that matter, limits their impact, makes recovery possible, and gives engineers enough evidence to understand what happened afterward.
 
-Determinism is the ability to get the same result when the relevant inputs and state are the same. It makes testing and debugging far easier, because a case that failed once can be made to fail again. Control is the ability to decide how resources, timing, execution, and failure are handled, instead of leaving every one of those decisions to a higher-level runtime or to some external component.
+Determinism is the ability to get the same result when the inputs and state are the same. It makes testing and debugging easier, because a case that failed once can be made to fail again. Control is the ability to decide how resources, timing, execution, and failure are handled. You decide these things instead of leaving every choice to a higher-level runtime or to an external component.
 
-The balance worth holding onto is this:
+The balance worth keeping is this:
 
 > Use enough control to meet the system's requirements, but do not take responsibility for details that do not matter to the problem you are solving.
 
-## Failure is a normal condition, not an exception
+## Failure is normal, not an exception
 
 In small code examples, the main path is usually written as if every operation succeeds. A file opens, a network request returns, memory is allocated, and a database accepts the write. Real systems have many more possible outcomes than that.
 
@@ -42,19 +42,19 @@ An operation can land in any of these states:
 - Be interrupted by a crash or by cancellation
 - Return a result that is valid but no longer useful
 
-These are not interchangeable. The system may need a completely different response to each one.
+These states are not interchangeable. The system may need a completely different response to each one.
 
-Think about the difference in how you would react. If opening a configuration file fails because the file does not exist, retrying immediately will not help, because the file will still not be there. If a network connection is refused for a moment, a bounded retry may be perfectly reasonable. If a payment request times out after the remote system may already have accepted it, retrying without an idempotency mechanism can create a duplicate charge, which is a much worse outcome than the original delay.
+Think about how you would react to each case. Suppose opening a config file fails because the file does not exist. Retrying right away will not help, because the file will still not be there. Suppose a network connection is refused for a moment. A small retry may be perfectly reasonable. Suppose a payment request times out after the remote system may already have accepted it. Retrying without an idempotency mechanism can create a duplicate charge. That is a worse outcome than the original delay.
 
-So the first step in handling failure is simply to understand what the failure actually means before you act on it.
+So the first step in handling failure is simple. Understand what the failure actually means before you act on it.
 
-## Errors, timeouts, and cancellation are not the same thing
+## Errors, timeouts, and cancellation are different things
 
-An error is an explicit result saying that an operation did not succeed in the way requested. The program may know the reason, such as permission denied, invalid input, or a missing file.
+An error is an explicit result saying that an operation did not succeed as requested. The program may know the reason, such as permission denied, invalid input, or a missing file.
 
-A timeout means the caller stopped waiting after a deadline it set for itself. It does not automatically mean the operation failed on the other side. The remote system may still be processing it, or it may have completed just before the response was lost on the way back.
+A timeout means the caller stopped waiting after a deadline it set for itself. It does not automatically mean the operation failed on the other side. The remote system may still be processing it. Or it may have completed just before the response was lost on the way back.
 
-Cancellation means the caller no longer wants the operation to continue. Cancellation is a request, not a guarantee. A local function may stop quickly, but a remote server may never receive the cancellation, or it may have already committed the work by the time the message arrives.
+Cancellation means the caller no longer wants the operation to continue. Cancellation is a request, not a guarantee. A local function may stop quickly. But a remote server may never receive the cancellation. Or it may have already committed the work by the time the message arrives.
 
 ```mermaid
 sequenceDiagram
@@ -71,13 +71,13 @@ sequenceDiagram
 
 The client knows that it did not receive a response in time. It does not automatically know whether the server performed the operation.
 
-This distinction is what makes retries tricky. Retrying a read is often safe, because reading the same data twice changes nothing. Retrying a state-changing operation is a different matter. A state-changing operation needs a way to recognize that the retry belongs to work already attempted, or you risk doing the work twice.
+This distinction is what makes retries tricky. Retrying a read is often safe, because reading the same data twice changes nothing. Retrying a state-changing operation is a different matter. A state-changing operation needs a way to recognize that the retry belongs to work already attempted. Without that, you risk doing the work twice.
 
 ## When only part of an operation succeeds
 
-Partial failure happens when only part of an operation completes. It is common whenever an operation crosses a boundary or contains several steps, because each step can fail independently of the others.
+Partial failure happens when only part of an operation completes. It is common whenever an operation crosses a boundary or contains several steps. Each step can fail on its own.
 
-Imagine a service that creates an order. It may validate the request, write the order to a database, publish an event, and return a response. A failure can happen after any of those steps, and the state left behind is different each time.
+Imagine a service that creates an order. It may validate the request, write the order to a database, publish an event, and return a response. A failure can happen after any of those steps. The state left behind is different each time.
 
 ```mermaid
 flowchart LR
@@ -91,17 +91,17 @@ flowchart LR
 
 The failure after the event is published is not the same as the failure before the order is written. In the first case, nothing may have happened. In the second, the order is real but downstream systems never heard about it. The system needs different recovery behavior for each of those cases.
 
-A transaction can make several local database changes appear as one atomic operation, meaning that all of them commit together or none of them become visible. A transaction does not automatically make a database write and a message sent to another service atomic, because the message leaves the database boundary. That cross-service boundary needs another design, such as an outbox pattern, a reconciliation process, or an explicit retry and deduplication strategy.
+A transaction can make several local database changes appear as one atomic operation. Atomic means that all of them commit together or none of them become visible. A transaction does not automatically make a database write and a message to another service atomic, because the message leaves the database boundary. That cross-service boundary needs another design. Examples are an outbox pattern, a reconciliation process, or an explicit retry and deduplication strategy.
 
 The useful question is not only whether the operation failed. It is:
 
 > Which effects definitely happened, which definitely did not happen, and which are uncertain?
 
-## Design recovery before the failure occurs
+## Design recovery before the failure happens
 
 Recovery is the process of returning a system to a useful and correct state after a failure. It may involve retrying work, rolling back local changes, replaying a log, rebuilding state, restoring a backup, or asking another component to reconcile what happened.
 
-Good recovery design starts by naming what must remain true no matter what. These conditions are often called invariants, which are simply rules that have to hold while the system operates.
+Good recovery design starts by naming what must remain true no matter what. These conditions are often called invariants, which are simply rules that have to hold while the system runs.
 
 For an order system, possible invariants include:
 
@@ -110,13 +110,13 @@ For an order system, possible invariants include:
 - An order marked as paid has a record of the payment result.
 - An order cannot be shipped before it is accepted for fulfillment.
 
-The recovery process exists to restore or preserve exactly these rules. Restarting a process is not enough on its own, because the process may come back up with inconsistent data already on disk or already visible to other services.
+The recovery process exists to restore or preserve exactly these rules. Restarting a process is not enough on its own. The process may come back up with inconsistent data already on disk or already visible to other services.
 
 ## Idempotency makes repeating work safe
 
-An operation is idempotent when applying it more than once produces the same final effect as applying it once. The operation may still return different responses on each attempt, but repeating it does not create an additional unwanted effect.
+An operation is idempotent when applying it more than once produces the same final effect as applying it once. The operation may still return different responses on each attempt, but repeating it does not create an unwanted extra effect.
 
-Setting a user's email address to a specific value is naturally close to idempotent, because setting it to the same value twice leaves the same result. Sending a payment request or incrementing a counter is not, because each repetition applies the effect again. Repeating a payment or an increment can change the world more than once.
+Setting a user's email address to a specific value is naturally close to idempotent. Setting it to the same value twice leaves the same result. Sending a payment request or incrementing a counter is not, because each repetition applies the effect again. Repeating a payment or an increment changes the world more than once.
 
 A common way to make a request idempotent is to give it a unique idempotency key. The server stores the result associated with that key. If the same key arrives again, the server returns the recorded result instead of performing the operation a second time.
 
@@ -136,7 +136,7 @@ Server finds the existing result and returns it
 
 The key has to be scoped correctly, stored reliably, and tied to the request's important parameters. If the same key can be reused for a different payment, the protection is unsafe. If the record is lost too soon, a late retry may be treated as brand new work and run twice.
 
-Idempotency does not mean every operation is automatically safe to repeat. It is a deliberate protocol between the caller and the component performing the work, and both sides have to honor it.
+Idempotency does not mean every operation is automatically safe to repeat. It is a deliberate protocol between the caller and the component performing the work. Both sides have to honor it.
 
 ## Retries can help, and can also make things worse
 
@@ -157,13 +157,13 @@ These controls do not make retries universally safe. A retry policy still has to
 
 ## Timeouts keep waiting from becoming permanent
 
-Every operation that waits for another component should have a reasonable deadline. Without a timeout, a blocked operation can hold a thread, memory, connection, or queue slot forever, and slowly starve everything around it.
+Every operation that waits for another component should have a reasonable deadline. Without a timeout, a blocked operation can hold a thread, memory, connection, or queue slot forever. It slowly starves everything around it.
 
-A timeout is a resource-protection mechanism as much as a user-experience setting. If a service receives a thousand requests and each one waits indefinitely for a broken dependency, the service may exhaust all of its workers and become unable to answer even the simple requests that have nothing to do with the broken part.
+A timeout is a resource-protection mechanism as much as a user-experience setting. Suppose a service receives a thousand requests and each one waits indefinitely for a broken dependency. The service may exhaust all of its workers. Then it cannot answer even the simple requests that have nothing to do with the broken part.
 
 Timeouts should be placed at the right boundaries. A database query may have a query timeout. A network connection may have a connect timeout. A request may have an end-to-end deadline that includes all of the internal work it triggers.
 
-The deadlines have to be coordinated with each other. If a caller gives a request five hundred milliseconds but an internal dependency is allowed to wait for two seconds, the dependency can keep working long after the caller has already given up. That work consumes resources without helping the original request, which has moved on.
+The deadlines have to be coordinated with each other. Suppose a caller gives a request five hundred milliseconds, but an internal dependency is allowed to wait for two seconds. The dependency can keep working long after the caller has already given up. That work consumes resources without helping the original request, which has moved on.
 
 ## Cancellation has to reach the work that is running
 
@@ -171,7 +171,7 @@ Cancellation tells work that it is no longer needed. For cancellation to protect
 
 Suppose a user closes a page while the server is still generating a large report. If the server notices the disconnected client and cancels the database query, the file reads, and the computation, it can release resources early. If cancellation stops only the final response while the internal work keeps running, the server still spends CPU, memory, storage, and database capacity on a request nobody is waiting for.
 
-Cancellation matters even more in concurrent systems. A parent operation should know which child tasks it started, and it should decide whether those tasks continue, finish, or stop when the parent fails. Otherwise the children keep consuming resources in service of a goal that no longer exists.
+Cancellation matters even more in concurrent systems. A parent operation should know which child tasks it started. It should decide whether those tasks continue, finish, or stop when the parent fails. Otherwise the children keep consuming resources in service of a goal that no longer exists.
 
 ## What a crash leaves behind
 
@@ -227,7 +227,7 @@ Not every variation is a bug. A network can legitimately deliver valid messages 
 
 ## Race conditions
 
-A race condition occurs when the result depends on the timing or order of operations that can run concurrently. A data race is a specific case where concurrent accesses to the same memory include at least one write and are not properly synchronized.
+A race condition occurs when the result depends on the timing or order of operations that can run at the same time. A data race is a specific case where concurrent accesses to the same memory include at least one write and are not properly synchronized.
 
 Consider two workers updating a shared counter:
 
@@ -266,13 +266,13 @@ To improve reproduction, control or record:
 
 You cannot always reproduce a production failure exactly, and chasing a perfect replay can waste time. The goal is to shrink the number of unknowns until a useful explanation can be tested.
 
-For a concurrency bug, running the same test may not reproduce the same schedule. A stress test may raise the chance of failure, while a scheduler or race detector may give more useful evidence than repeated runs. For a time-related bug, injecting a fake clock may be better than waiting for a particular date to arrive.
+Suppose you have a concurrency bug. Running the same test may not reproduce the same schedule. A stress test may raise the chance of failure. A scheduler or race detector may give more useful evidence than repeated runs. Suppose you have a time-related bug. Injecting a fake clock may be better than waiting for a particular date to arrive.
 
 ## Reproducible builds
 
 A reproducible build produces the same artifact from the same source and declared inputs. An artifact is the result of the build, such as a binary, a container image, or a package.
 
-Reproducibility helps with debugging, rollback, security review, and trust. If a binary running in production cannot be recreated from its source and its dependencies, it is hard to know what code is actually running, and hard to reproduce its behavior when something goes wrong.
+Reproducibility helps with debugging, rollback, security review, and trust. If a binary running in production cannot be recreated from its source and its dependencies, it is hard to know what code is actually running. It is also hard to reproduce its behavior when something goes wrong.
 
 Sources of build variation include:
 
@@ -290,7 +290,7 @@ Not every project needs perfect bit-for-bit reproducibility right away, but the 
 
 Higher-level tools and runtimes make development faster by managing details for you. A garbage collector handles much of memory reclamation. A connection pool manages reusable connections. A framework manages request routing. A scheduler manages task placement.
 
-This convenience is genuinely valuable. It reduces the code you write, removes whole classes of common mistakes, and shrinks the amount of detail each engineer has to hold in their head. The cost is that the program inherits the tool's policies and behavior whether you like them or not.
+This convenience is genuinely valuable. It reduces the code you write, removes whole classes of common mistakes, and shrinks the amount of detail each engineer has to keep in their head. The cost is that the program inherits the tool's policies and behavior whether you like them or not.
 
 For example, a garbage-collected runtime may pause or spend CPU on collection at an inconvenient moment. A connection pool may queue requests when every connection is busy. A framework may buffer a request body in memory. A scheduler may move work between CPUs and disturb cache locality.
 
@@ -318,7 +318,7 @@ It also creates responsibilities:
 - Documentation
 - Future maintenance
 
-The decision should come from a measured requirement, not from the belief that lower-level code is automatically better. Sometimes it is, and sometimes it simply trades one hard problem for another.
+The decision should come from a measured requirement, not from the belief that lower-level code is automatically better. Sometimes it is. Sometimes it simply trades one hard problem for another.
 
 ## A realistic example
 
@@ -350,7 +350,7 @@ stateDiagram-v2
 
 The state machine makes the recovery decisions explicit. A failed job in Running may need to be retried from where it stopped. A job in Uploaded may only need its final metadata updated. A job in Completed should not be run again just because a client never received the original response.
 
-The design is not only about code. It is about representing enough state to tell incomplete work apart from completed work, because the difference is exactly what recovery depends on.
+The design is not only about code. It is about representing enough state to tell incomplete work apart from completed work. That difference is exactly what recovery depends on.
 
 ## How engineers actually investigate a failure
 
@@ -370,17 +370,17 @@ They may ask:
 - Can the operation be retried safely?
 - What evidence would prove or disprove each explanation?
 
-The point is not to sound cautious. It is to avoid making a recovery action that creates a second failure, such as retrying a non-idempotent operation, raising a limit until a downstream system collapses, or deleting state that is still needed for recovery.
+The point is not to sound cautious. It is to avoid making a recovery action that creates a second failure. Examples are retrying a non-idempotent operation, raising a limit until a downstream system collapses, or deleting state that is still needed for recovery.
 
 ## Definitions
 
 ### Failure handling
 
-> When we talk about failure handling, we mean the set of decisions a system makes about operations that do not complete normally: how it detects them, contains their effect, reports what happened, recovers when it can, and gives up cleanly when it cannot.
+> Failure handling is the set of decisions a system makes about operations that do not complete normally. It detects them, contains their effect, reports what happened, recovers when it can, and gives up cleanly when it cannot.
 
 ### Partial failure
 
-> Partial failure is what happens when part of an operation succeeds while another part fails or becomes uncertain, leaving the system responsible for deciding how to recover or reconcile the result.
+> Partial failure happens when part of an operation succeeds while another part fails or becomes uncertain. The system is then responsible for deciding how to recover or reconcile the result.
 
 ### A timeout
 
@@ -428,7 +428,7 @@ The point is not to sound cautious. It is to avoid making a recovery action that
 
 ### "A timeout means the server did nothing."
 
-A timeout only means the caller did not receive a result before its deadline. The server may still be working, or it may have completed the operation and lost the reply on the way back.
+A timeout only means the caller did not receive a result before its deadline. The server may still be working. Or it may have completed the operation and lost the reply on the way back.
 
 ### "Retrying always improves reliability."
 
@@ -444,12 +444,12 @@ Real systems have legitimate variation from timing, scheduling, networks, and de
 
 ### "The lowest-level implementation is the most reliable."
 
-Lower-level code can give more control, but it also creates more room for memory bugs, cleanup failures, portability problems, and incorrect assumptions. Reliability comes from fitting the design to the requirements and managing its risks, not from how close to the metal the code sits.
+Lower-level code can give more control, but it also creates more room for memory bugs, cleanup failures, portability problems, and incorrect assumptions. Reliability comes from fitting the design to the requirements and managing its risks. It does not come from how close to the metal the code sits.
 
 ## Summary
 
-Failure is not an unusual exception to systems behavior. It is one of the conditions the system must be designed to handle. Errors, timeouts, cancellation, crashes, and partial completion have different meanings, and they should not all be treated as the same event.
+Failure is not an unusual exception to systems behavior. It is one of the conditions the system must be designed to handle. Errors, timeouts, cancellation, crashes, and partial completion have different meanings. They should not all be treated as the same event.
 
-Determinism makes behavior easier to test and debug, but systems naturally contain variation from concurrency, networks, clocks, devices, and external services. Good designs control the variation that affects correctness and record enough information to investigate the rest.
+Determinism makes behavior easier to test and debug, but systems naturally contain variation from concurrency, networks, clocks, devices, and external services. Good designs control the variation that affects correctness. They also record enough information to investigate the rest.
 
-Higher-level abstractions reduce the detail engineers have to manage. Taking more direct control can improve predictability or performance, but it also creates responsibility for cleanup, synchronization, portability, security, and maintenance. The right choice is the simplest abstraction that satisfies the real requirements, and no simpler.
+Higher-level abstractions reduce the detail engineers have to manage. Taking more direct control can improve predictability or performance. But it also creates responsibility for cleanup, synchronization, portability, security, and maintenance. The right choice is the simplest abstraction that satisfies the real requirements, and no simpler.
